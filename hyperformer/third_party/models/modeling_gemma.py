@@ -471,18 +471,6 @@ class Gemma2Model(Gemma2PreTrainedModel):
         )
 
 
-
-
-
-
-from transformers.models.gemma3.modeling_gemma3 import Gemma3RotaryEmbedding
-from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from transformers.cache_utils import Cache, DynamicCache
-import torch
-from torch import nn
-from typing import Optional, Union
-from transformers.modeling_outputs import BaseModelOutputWithPast
-
 class Gemma3TextModel(Gemma3PreTrainedModel):
     """
     Gemma-3 text-only decoder stack with adapter plumbing similar to T5Stack.
