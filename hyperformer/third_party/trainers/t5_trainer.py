@@ -360,11 +360,7 @@ class T5Trainer(Trainer):
                     * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
             )
 
-        num_examples = (
-            self.num_examples(train_dataloader)
-            if train_dataset_is_sized
-            else total_train_batch_size * self.args.max_steps
-        )
+         
 
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", num_examples)
