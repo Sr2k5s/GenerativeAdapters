@@ -1,78 +1,60 @@
 # --- standard library ---
-import copy
-import warnings
 from collections.abc import Callable
 from typing import Optional, Tuple, Union
 
 # --- PyTorch ---
 import torch
 from torch import nn
-from torch.nn import CrossEntropyLoss
 
-# --- transformers: common outputs & utils ---
-from transformers.modeling_outputs import (
-    BaseModelOutput,
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from transformers.utils import logging  # keep the canonical HF logger as `logging`
-from config_gemma3 import Gemma3TextConfig
-# --- transformers: Gemma 3 ---
-from transformers.models.gemma3.modeling_gemma3 import (
-    Gemma3PreTrainedModel,          # base class (like T5PreTrainedModel)
-    Gemma3TextModel,                # text-only decoder backbone
-    Gemma3ForCausalLM,              # text LM head (decoder-only)
-    Gemma3Model,                    # multimodal backbone (vision+text)
-    Gemma3ForConditionalGeneration, # VLM head (image+text generation)
-    Gemma3Attention,                # attention module
-    Cache as Gemma3Cache,           # alias to avoid collision with cache_utils.Cache
-    _bidirectional_window_overlay,
-    Gemma3TextScaledWordEmbedding,
-)
+# --- transformers: logging & common utils ---
+from transformers.utils import logging, auto_docstring
+from transformers.utils.generic import check_model_inputs
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs
 
-# --- transformers: Gemma 2 helpers reused by Gemma 3 stacks ---
+# --- transformers: outputs, cache, generation, masking, attention utils ---
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.generation import GenerationMixin
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.modeling_layers import GradientCheckpointingLayer
+
+# --- transformers: activations & rope helpers ---
+from transformers.activations import ACT2FN
+
+# --- Gemma 2 (used as building blocks) ---
+from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import (
+    Gemma2PreTrainedModel,
     Gemma2RotaryEmbedding,
-    rotate_half,
     apply_rotary_pos_emb,
-    repeat_kv,
     eager_attention_forward,
 )
 
-# --- hyperformer adapters (unchanged) ---
+# --- Gemma 3 (pretrained base + rotary + scaled embedding + helpers) ---
+from transformers.models.gemma3.modeling_gemma3 import (
+    Gemma3PreTrainedModel,
+    Gemma3RotaryEmbedding,
+    Gemma3TextScaledWordEmbedding,
+    Gemma3CausalLMOutputWithPast,
+    _bidirectional_window_overlay,
+)
+
+# --- adapter controllers (hyperformer) ---
 from hyperformer.adapters import (
     AutoAdapterController,
     MetaAdapterConfig,
     TaskEmbeddingController,
-    LayerNormHyperNet,
     AdapterLayersHyperNetController,
     MetaLayersAdapterController,
     AdapterLayersOneHyperNetController,
 )
 
-# --- transformers: internal building blocks (public import paths) ---
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache          # note: `Cache` differs from `Gemma3Cache`
-from transformers.generation import GenerationMixin
-from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_layers import (
-    GenericForSequenceClassification,
-    GenericForTokenClassification,
-    GradientCheckpointingLayer,
-)
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.processing_utils import Unpack
-from transformers.utils import (
-    TransformersKwargs,
-    auto_docstring,
-    can_return_tuple,
-)
-from transformers.utils.generic import check_model_inputs
+# --- your local config for Gemma-3 text ---
+from config_gemma3 import Gemma3TextConfig
 
-# --- optional: configs (if you actually use them in this module) ---
-from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 
 logger = logging.get_logger(__name__)
 
@@ -118,19 +100,24 @@ class Gemma2FFWrapper(nn.Module):
     def __init__(self, config, adapter_config = None):
         super().__init__()
         self.mlp_original_gemma = Gemma2MLP(config)
-        self.train_adapters = config.train_adapters
-        if self.train_adapters:
-            self.unique_hyper_net = True if isinstance(adapter_config, MetaAdapterConfig) and \
-                                            (adapter_config.unique_hyper_net
-                                             or adapter_config.efficient_unique_hyper_net) else False
-            self.train_adapters_blocks = adapter_config.train_adapters_blocks and not self.unique_hyper_net
+        self.train_adapters = getattr(config, "train_adapters", False)
+        self.unique_hyper_net = False
+        self.train_adapters_blocks = False
+        if self.train_adapters and adapter_config is not None:
+            self.unique_hyper_net = isinstance(adapter_config, MetaAdapterConfig) and (
+                                                adapter_config.unique_hyper_net or adapter_config.efficient_unique_hyper_net
+                                                )
+            self.train_adapters_blocks = getattr(adapter_config, "train_adapters_blocks", False) and not self.unique_hyper_net
             if self.train_adapters_blocks:
                 self.adapter_controller = AutoAdapterController.get(adapter_config)
-                self.is_meta_adapter = True if isinstance(adapter_config, MetaAdapterConfig) else False
+                self.is_meta_adapter = isinstance(adapter_config, MetaAdapterConfig)
             elif self.unique_hyper_net:
                 self.layer_hyper_net = MetaLayersAdapterController(adapter_config)
+
         self.layer_norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.dropout = nn.Dropout(config.dropout_rate)
+        self.dropout = nn.Dropout(getattr(config, "residual_dropout",
+                                  getattr(config, "dropout_rate", 0.0)))
+
 
     def forward(self, hidden_states, task=None, task_embedding=None, gemma_adapters=None):
         norm_x = self.layer_norm(hidden_states)
@@ -153,7 +140,8 @@ class Gemma2Attention(nn.Module):
         self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = config.query_pre_attn_scalar**-0.5
+        scale = float(getattr(config, "query_pre_attn_scalar", 1.0))
+        self.scaling = (self.head_dim * scale) ** -0.5
         self.attention_dropout = self.config.attention_dropout
         self.is_causal = not getattr(config, "use_bidirectional_attention", False)
 
@@ -226,19 +214,24 @@ class Gemma2AttentionWrapper(nn.Module):
         self.attn = Gemma2Attention(config = config,
                                             layer_idx = layer_idx)
         
-        self.train_adapters = config.train_adapters
-        if self.train_adapters:
-            self.unique_hyper_net = True if isinstance(adapter_config, MetaAdapterConfig) and \
-                                            (adapter_config.unique_hyper_net or
-                                             adapter_config.efficient_unique_hyper_net) else False
-            self.train_adapter_blocks = adapter_config.train_adapters_blocks and not self.unique_hyper_net
-            if self.train_adapter_blocks:
+        self.train_adapters = getattr(config, "train_adapters", False)
+        self.unique_hyper_net = False
+        self.train_adapters_blocks = False
+        if self.train_adapters and adapter_config is not None:
+            self.unique_hyper_net = isinstance(adapter_config, MetaAdapterConfig) and (
+                                                adapter_config.unique_hyper_net or adapter_config.efficient_unique_hyper_net
+                                                )
+            self.train_adapters_blocks = getattr(adapter_config, "train_adapters_blocks", False) and not self.unique_hyper_net
+            if self.train_adapters_blocks:
                 self.adapter_controller = AutoAdapterController.get(adapter_config)
-                self.is_meta_adapter = True if isinstance(adapter_config, MetaAdapterConfig) else False
+                self.is_meta_adapter = isinstance(adapter_config, MetaAdapterConfig)
             elif self.unique_hyper_net:
                 self.layer_hyper_net = MetaLayersAdapterController(adapter_config)
+
         self.rms_norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.dropout = nn.Dropout(config.dropout_rate)
+        self.dropout = nn.Dropout(getattr(config, "residual_dropout",
+                                  getattr(config, "dropout_rate", 0.0)))
+
 
     def forward(
         self,
@@ -251,44 +244,59 @@ class Gemma2AttentionWrapper(nn.Module):
         output_attentions: Optional[bool] = False,
         task=None,
         task_embedding=None,
-        gemma_adapters=None,          # expects a struct with `.self_attention` when unique_hyper_net=True
+        gemma_adapters=None,          # expects .self_attention when unique_hyper_net=True
         **kwargs,                     # flash-attn kwargs etc.
     ):
+        # Strip non-kernel kwargs; keep flash-attn knobs intact
+        for k in ("position_ids", "use_cache", "task", "task_embedding", "gemma_adapters"):
+            kwargs.pop(k, None)
+        kwargs["output_attentions"] = bool(output_attentions)
+
         norm_x = self.rms_norm(hidden_states)
-        attention_output = self.attn(
+        attn_res = self.attn(
             hidden_states=norm_x,
             position_embeddings=position_embeddings,  # (cos, sin)
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             cache_position=cache_position,
-            output_attentions=output_attentions,
             **kwargs,
         )
-        y = attention_output[0]
-        if self.train_adapters and self.train_adapter_blocks:
-            y = self.adapter_controller(task if not self.is_meta_adapter else task_embedding, y)
-        elif self.train_adapters and self.unique_hyper_net:
-            y = self.layer_hyper_net(y, gemma_adapters.self_attention)
+
+        # Unpack robustly
+        if isinstance(attn_res, tuple) and len(attn_res) == 2:
+            attn_out, attn_weights = attn_res
+        else:
+            attn_out, attn_weights = attn_res, None
+
+        y = attn_out
+        if self.train_adapters:
+            if self.train_adapters_blocks:
+                y = self.adapter_controller(task if not getattr(self, "is_meta_adapter", False) else task_embedding, y)
+            elif self.unique_hyper_net and gemma_adapters is not None:
+                sa = getattr(gemma_adapters, "self_attention", None)
+                if sa is not None:
+                    y = self.layer_hyper_net(y, sa)
+
         layer_output = hidden_states + self.dropout(y)
-        outputs = (layer_output,) + attention_output[1:]  # add attentions if we output them
-        return outputs
-    
+        return (layer_output, attn_weights) if output_attentions else (layer_output,)
+
 
 
 
 class Gemma2DecoderLayer(GradientCheckpointingLayer):
-    def __init__(self, config: Gemma2Config, layer_idx: int):
+    def __init__(self, config: Gemma2Config, layer_idx: int, adapter_config):
         super().__init__()
+        self.adapter_config = adapter_config
         self.hidden_size = config.hidden_size
         self.config = config
         self.attention_type = config.layer_types[layer_idx]
-        self.self_attn = Gemma2AttentionWrapper(config=config, layer_idx=layer_idx)
-        self.mlp = Gemma2FFWrapper(config)
+        self.self_attn = Gemma2AttentionWrapper(config=config, adapter_config = self.adapter_config, layer_idx=layer_idx)
+        self.mlp = Gemma2FFWrapper(config=config, adapter_config = adapter_config)
         #self.input_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        #self.post_attention_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         #self.pre_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        #self.post_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -302,12 +310,9 @@ class Gemma2DecoderLayer(GradientCheckpointingLayer):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        residual = hidden_states
 
-        #hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        # Self-attention (wrapper already does norm + residual)
+        attn_tuple = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
@@ -318,60 +323,36 @@ class Gemma2DecoderLayer(GradientCheckpointingLayer):
             cache_position=cache_position,
             **kwargs,
         )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = attn_tuple[0]
+        self_attn_weights = attn_tuple[1] if output_attentions and len(attn_tuple) > 1 else None
 
-        residual = hidden_states
-        #hidden_states = self.pre_feedforward_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        # Feed-forward (wrapper already does norm + residual and adapter plumbing)
+        hidden_states = self.mlp(
+            hidden_states,
+            task=kwargs.get("task"),
+            task_embedding=kwargs.get("task_embedding"),
+            gemma_adapters=kwargs.get("gemma_adapters"),
+        )
 
         outputs = (hidden_states,)
-
         if output_attentions:
             outputs += (self_attn_weights,)
-
         return outputs
 
 
-
-class Gemma2PreTrainedModel(PreTrainedModel):
-    config: Gemma2Config
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["Gemma2DecoderLayer"]
-    _skip_keys_device_placement = ["past_key_values"]
-    _supports_flash_attn = True
-    _supports_sdpa = True
-    _supports_flex_attn = True
-
-    _can_compile_fullgraph = True
-    _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": Gemma2DecoderLayer,
-        "attentions": Gemma2Attention,
-    }
-
-    def _init_weights(self, module):
-        super()._init_weights(module)
-
-        # We initialize with 0s to be 1 centered as the RMSNorm here does (1 + weight)
-        if "RMSNorm" in module.__class__.__name__:
-            module.weight.data.zero_()
 
 
 
 @auto_docstring
 class Gemma2Model(Gemma2PreTrainedModel):
-    def __init__(self, config: Gemma2Config):
+    def __init__(self, config: Gemma2Config, adapter_config=None):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [Gemma2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [Gemma2DecoderLayer(config, layer_idx,adapter_config=adapter_config) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Gemma2RotaryEmbedding(config)
@@ -401,7 +382,7 @@ class Gemma2Model(Gemma2PreTrainedModel):
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
+        if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if self.gradient_checkpointing and self.training and use_cache:
@@ -449,7 +430,7 @@ class Gemma2Model(Gemma2PreTrainedModel):
         # normalized
         # Gemma2 downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
         # See https://github.com/huggingface/transformers/pull/29402
-        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
+        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
 
         # decoder layers
@@ -494,18 +475,92 @@ class Gemma2Model(Gemma2PreTrainedModel):
 
 
 
-class Gemma3TextModel(Gemma2Model):
+from transformers.models.gemma3.modeling_gemma3 import Gemma3RotaryEmbedding
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.cache_utils import Cache, DynamicCache
+import torch
+from torch import nn
+from typing import Optional, Union
+from transformers.modeling_outputs import BaseModelOutputWithPast
+
+class Gemma3TextModel(Gemma3PreTrainedModel):
+    """
+    Gemma-3 text-only decoder stack with adapter plumbing similar to T5Stack.
+
+    Key parity with T5Stack:
+      - accepts `adapter_config` in __init__
+      - builds a ModuleList of decoder layers, each adapter-aware
+      - supports unique/efficient hypernet controllers at the stack level
+      - forwards `task`, `task_embedding`, and per-layer adapter weights (`gemma_adapters`)
+      - final layer norm + (optional) residual dropout like T5Stack's final dropout
+    """
+
     config: Gemma3TextConfig
     input_modalities = "text"
 
-    def __init__(self, config: Gemma3TextConfig):
+    def __init__(self, config: Gemma3TextConfig, embed_tokens: Optional[nn.Embedding] = None, adapter_config=None):
         super().__init__(config)
+        self.adapter_config = adapter_config
+        self.is_decoder = True  # Gemma text stack is a decoder-only transformer
+        self.gradient_checkpointing = False
 
-        # Gemma3 downcasts the below to bfloat16, causing sqrt(3072)=55.4256 to become 55.5. See https://github.com/huggingface/transformers/pull/29402
-        self.embed_tokens = Gemma3TextScaledWordEmbedding(
-            config.vocab_size, config.hidden_size, self.padding_idx, embed_scale=self.config.hidden_size**0.5
+
+        # --- Embeddings ---
+        # Gemma3 scales embeddings internally by sqrt(hidden_size)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+        self.embed_tokens = (
+            embed_tokens
+            if embed_tokens is not None
+            else Gemma3TextScaledWordEmbedding(
+                config.vocab_size, config.hidden_size, self.padding_idx, embed_scale=config.hidden_size ** 0.5
+            )
         )
 
+        # --- Decoder layers (adapter-aware) ---
+        # Like T5Stack(block=...), we create N layers that know about adapters.
+        # Your decoder layer should accept `adapter_config` and wire it to attention/FF wrappers.
+        self.layers = nn.ModuleList(
+            [Gemma2DecoderLayer(config, layer_idx=i, adapter_config=self.adapter_config) for i in range(config.num_hidden_layers)]
+        )
+
+        # --- Adapter controllers at the stack level (T5 parity) ---
+        self.train_adapters = bool(getattr(config, "train_adapters", False))
+        self.unique_hyper_net = False
+        self.efficient_unique_hyper_net = False
+        if self.train_adapters and isinstance(adapter_config, MetaAdapterConfig):
+            self.unique_hyper_net = bool(getattr(adapter_config, "unique_hyper_net", False))
+            self.efficient_unique_hyper_net = bool(getattr(adapter_config, "efficient_unique_hyper_net", False))
+            if self.unique_hyper_net:
+                self.adapter_layers_hyper_net = AdapterLayersHyperNetController(adapter_config, config.num_hidden_layers)
+            if self.efficient_unique_hyper_net:
+                self.adapter_layers_hyper_net = AdapterLayersOneHyperNetController(adapter_config, config.num_hidden_layers)
+
+        # --- Positional encoding & norms ---
+        # Gemma3 rotary needs per-layer-type ROPE, so use the Gemma3RotaryEmbedding
+        self.rotary_emb = Gemma3RotaryEmbedding(config)
+        self.final_layer_norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # T5Stack uses `config.dropout_rate`; Gemma configs typically don't define it.
+        # Use residual_dropout if provided, otherwise fall back to attention_dropout (often 0.0).
+        p = float(getattr(config, "residual_dropout", getattr(config, "attention_dropout", 0.0)))
+        self.dropout = nn.Dropout(p)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    # --- T5Stack parity helpers ---
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def get_output_embeddings(self):
+        # Decoder-only; returning embeddings mirrors T5Stack interface
+        return self.embed_tokens
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        self.embed_tokens = new_embeddings
+
+    # --- Forward ---
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -516,42 +571,45 @@ class Gemma3TextModel(Gemma2Model):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
+
+        # --- adapter hooks (T5 parity) ---
+        task: Optional[str] = None,
+        task_embedding: Optional[torch.Tensor] = None,
     ) -> BaseModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        use_cache = self.config.use_cache if use_cache is None else use_cache
+        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
+        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
+        return_dict = self.config.use_return_dict if return_dict is None else return_dict
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
+        # Exactly one of input_ids / inputs_embeds
+        if (input_ids is None) == (inputs_embeds is None):
+            raise ValueError("You must specify exactly one of `input_ids` or `inputs_embeds`.")
+
+        if self.training and self.gradient_checkpointing and use_cache:
+            # Same behavior as HF stacks
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
             use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
+        # Create/advance cache positions
         if use_cache and past_key_values is None and not self.training:
             past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+            past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(past_seen, past_seen + inputs_embeds.shape[1], device=inputs_embeds.device)
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # It may already have been prepared by e.g. `generate`
-        if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
+        # --- Attention masks (Gemma3 has per-layer-type masks) ---
+        # Build mapping for {"full_attention": mask, "sliding_attention": mask}
+        if not isinstance(attention_mask, dict):
             mask_kwargs = {
                 "config": self.config,
                 "input_embeds": inputs_embeds,
@@ -560,31 +618,43 @@ class Gemma3TextModel(Gemma2Model):
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
-            sliding_mask_kwargs = mask_kwargs.copy()
+            sliding_kwargs = dict(mask_kwargs)
+            if getattr(self.config, "use_bidirectional_attention", False):
+                sliding_kwargs["or_mask_function"] = _bidirectional_window_overlay(self.config.sliding_window)
+            sliding_mask = create_sliding_window_causal_mask(**sliding_kwargs)
 
-            if self.config.use_bidirectional_attention:
-                mask_kwargs["or_mask_function"] = lambda *args: torch.tensor(True, dtype=torch.bool)
-                sliding_mask_kwargs["or_mask_function"] = _bidirectional_window_overlay(self.config.sliding_window)
-
-            # Create the masks
             causal_mask_mapping = {
                 "full_attention": create_causal_mask(**mask_kwargs),
-                "sliding_attention": create_sliding_window_causal_mask(**sliding_mask_kwargs),
+                "sliding_attention": sliding_mask,
             }
 
-        # embed positions
-        hidden_states = inputs_embeds
+        else:
+            causal_mask_mapping = attention_mask  # already prepared
+
+        # --- Rotary embeddings per layer type (Gemma3 style) ---
+        # Precompute (cos, sin) for each attention type present in config.layer_types
         position_embeddings = {}
         for layer_type in self.config.layer_types:
-            position_embeddings[layer_type] = self.rotary_emb(hidden_states, position_ids, layer_type)
+            position_embeddings[layer_type] = self.rotary_emb(inputs_embeds, position_ids, layer_type=layer_type)
 
-        # decoder layers
+        # --- Adapter hyper-net (per-layer) like T5Stack ---
+        # If using unique/efficient hypernets, compute layer-specific adapter weights container
+        
+
+        # --- Run decoder layers ---
+        hidden_states = self.dropout(inputs_embeds)
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            
+            gemma_adapters = None
+            if self.train_adapters and (self.unique_hyper_net or self.efficient_unique_hyper_net):
+                gemma_adapters = self.adapter_layers_hyper_net(task_embedding, i)
+
 
             layer_outputs = decoder_layer(
                 hidden_states,
@@ -595,18 +665,28 @@ class Gemma3TextModel(Gemma2Model):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                **kwargs,
+
+                # adapter signals
+                task=task,
+                task_embedding=task_embedding,
+                gemma_adapters=gemma_adapters,
             )
 
             hidden_states = layer_outputs[0]
-
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attns = all_self_attns + (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
+        # --- Final norm + (optional) dropout ---
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.dropout(hidden_states)
 
         if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            # T5Stack returns (hidden, past, hidden_states, attn, cross_attn)
+            # Here: no cross-attn in text-only stack, and past is carried via `past_key_values`
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_self_attns] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -616,11 +696,132 @@ class Gemma3TextModel(Gemma2Model):
         )
 
 
-class Gemma3ForCausalLM:
-    config: Gemma3TextConfig
-    base_model_prefix = "language_model"
 
-    def __init__(self, config: Gemma3TextConfig):
+
+
+class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
+    _checkpoint_conversion_mapping = {
+        "^language_model.model": "model.language_model",
+        "^vision_tower": "model.vision_tower",
+        "^multi_modal_projector": "model.multi_modal_projector",
+        "^language_model.lm_head": "lm_head",
+    }
+    _tied_weights_keys = ["lm_head.weight"]
+    accepts_loss_kwargs = False
+
+    def __init__(self, config, adapter_config=None):
         super().__init__(config)
-        self.model = Gemma3TextModel(config)
+        self.adapter_config = adapter_config
+        self.train_adapters = bool(getattr(config, "train_adapters", False))
 
+        if self.train_adapters and isinstance(adapter_config, MetaAdapterConfig):
+            self.task_embedding_controller = TaskEmbeddingController(adapter_config)
+        else:
+            self.task_embedding_controller = None
+
+        # Choose the right text config
+        self.text_config = getattr(config, "text_config", config)
+
+        # Text-only stack
+        self.model = Gemma3TextModel(self.text_config, adapter_config=adapter_config)
+
+        # LM head matches text dims
+        self.lm_head = nn.Linear(self.text_config.hidden_size, self.text_config.vocab_size, bias=False)
+
+        self.post_init()
+
+    # tie-weights support
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value):
+        self.model.set_input_embeddings(value)
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,  # accepted but unused in text-only
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,  # accepted but unused
+        cache_position: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        task: Optional[str] = None,
+        task_embedding: Optional[torch.Tensor] = None,
+        **lm_kwargs,
+    ) -> Union[tuple, Gemma3CausalLMOutputWithPast]:
+
+        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
+        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
+        return_dict = self.config.use_return_dict if return_dict is None else return_dict
+
+        if (
+            task_embedding is None
+            and self.train_adapters
+            and isinstance(self.adapter_config, MetaAdapterConfig)
+            and self.task_embedding_controller is not None
+        ):
+            task_embedding = self.task_embedding_controller(task)
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+            task=task,
+            task_embedding=task_embedding,
+            **lm_kwargs,
+        )
+
+        hidden_states = outputs[0]
+        # logits slice
+        if isinstance(logits_to_keep, int):
+            # -0 slices to 0 in Python; use full sequence when 0
+            sl = slice(None) if logits_to_keep == 0 else slice(-logits_to_keep, None)
+        else:
+            sl = logits_to_keep
+
+        logits = self.lm_head(hidden_states[:, sl, :])
+
+        loss = None
+        if labels is not None:
+            logits = logits.float()
+            shift_logits = logits[..., :-1, :]
+            shift_labels = labels[..., 1:]
+            if attention_mask is not None:
+                shift_attention_mask = attention_mask[:, -shift_logits.shape[1]:].to(logits.device)
+                shift_logits = shift_logits[shift_attention_mask != 0].contiguous()
+                shift_labels = shift_labels[shift_attention_mask != 0].contiguous()
+            loss_fct = nn.CrossEntropyLoss()
+            flat_logits = shift_logits.view(-1, self.text_config.vocab_size)
+            flat_labels = shift_labels.view(-1).to(shift_logits.device)
+            loss = loss_fct(flat_logits, flat_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return Gemma3CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
