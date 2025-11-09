@@ -212,3 +212,20 @@ class AdapterTrainingArguments:
                                                                               "norm after computing the "
                                                                               "embeddings for the unique "
                                                                               "hyper-net."})
+    
+### KD: Add new arguments for Knowledge Distillation
+@dataclass
+class KDArguments:
+    """
+    Arguments pertaining to Knowledge Distillation.
+    """
+    teacher_model_name_or_path: str = field(
+        default = "google/gemma-3-12b-it",metadata={"help": "Path to the pretrained teacher model for distillation."}
+    )
+    alpha_kd: float = field(
+        default=0.5, metadata={"help": "Weighting for the hard loss (CrossEntropy). (1-alpha) is for the soft loss (KLDiv)."}
+    )
+    temperature_kd: float = field(
+        default=2.0, metadata={"help": "Temperature for distillation."}
+    )
+

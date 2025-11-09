@@ -38,6 +38,11 @@ from transformers import BartTokenizer, EvalPrediction, PreTrainedTokenizer, T5T
 from transformers.file_utils import cached_property
 from transformers.modeling_bart import shift_tokens_right
 
+import torch
+from torch.nn.utils.rnn import pad_sequence
+from transformers import DataCollatorForLanguageModeling
+from typing import Dict, List, Union
+
 
 try:
     from fairseq.data.data_utils import batch_by_size
@@ -712,3 +717,106 @@ class TaskCollator:
     assert (len(set(tasks)) == 1)
     batch_encoding["task"] = tasks[0]
     return batch_encoding.data
+
+
+class TaskCollator_gemma:
+    """
+    Implements task-collator for a CausalLM (Gemma) on text-to-text
+    tasks (GEM dataset).
+
+    This collator:
+    1. Tokenizes prompts ("src_texts") and targets ("tgt_texts") separately.
+    2. Concatenates them into a single `input_ids` sequence:
+       [Prompt Tokens] + [Target Tokens] + [EOS Token]
+    3. Creates a `labels` sequence where prompt tokens are masked with -100:
+       [-100, ..., -100] + [Target Tokens] + [EOS Token]
+    4. Pads all sequences to the longest in the batch.
+    5. Includes the "task" name for the adapter controller.
+    """
+    def __init__(self, tokenizer, data_args, tpu_num_cores=None):
+        self.tokenizer = tokenizer
+        self.pad_token_id = tokenizer.pad_token_id
+        assert (
+            self.pad_token_id is not None
+        ), f"pad_token_id is not defined for ({self.tokenizer.__class__.__name__}), it must be defined."
+        
+        self.data_args = data_args
+        self.max_source_length = data_args.max_source_length
+        self.max_target_length = data_args.max_target_length
+        self.tpu_num_cores = tpu_num_cores
+        
+        # We use -100 to mask out tokens in the labels
+        self.ignore_index = -100
+
+    def __call__(self, batch: List[Dict[str, Union[str, int]]]) -> Dict[str, torch.Tensor]:
+        prompts = [x["src_texts"] for x in batch]
+        targets = [x["tgt_texts"] for x in batch]
+        tasks = [x["task"] for x in batch]
+
+        # There should be only one task per batch for adapters
+        assert (len(set(tasks)) == 1), "Each batch must contain only one task."
+        task_name = tasks[0]
+
+        # 1. Tokenize prompts (sources)
+        prompt_encodings = self.tokenizer(
+            prompts,
+            max_length=self.max_source_length,
+            truncation=True,
+            padding=False
+        )
+
+        # 2. Tokenize targets and add EOS token
+        target_encodings = self.tokenizer(
+            targets,
+            max_length=self.max_target_length,
+            truncation=True,
+            padding=False
+        )
+
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+
+        for i in range(len(prompts)):
+            prompt_ids = prompt_encodings["input_ids"][i]
+            prompt_mask = prompt_encodings["attention_mask"][i]
+            
+            target_ids = target_encodings["input_ids"][i]
+            target_mask = target_encodings["attention_mask"][i]
+
+            # 3. Add EOS token to the end of the target
+            target_ids.append(self.tokenizer.eos_token_id)
+            target_mask.append(1)
+            
+            # 4. Concatenate prompt and target
+            input_ids = prompt_ids + target_ids
+            attention_mask = prompt_mask + target_mask
+
+            # 5. Create labels: mask out the prompt
+            labels = ([self.ignore_index] * len(prompt_ids)) + target_ids
+
+            batch_input_ids.append(torch.tensor(input_ids))
+            batch_attention_mask.append(torch.tensor(attention_mask))
+            batch_labels.append(torch.tensor(labels))
+
+        # 6. Pad the batch
+        # We use the tokenizer's pad_token_id for inputs and mask
+        input_ids = pad_sequence(
+            batch_input_ids, batch_first=True, padding_value=self.pad_token_id
+        )
+        attention_mask = pad_sequence(
+            batch_attention_mask, batch_first=True, padding_value=0
+        )
+        # We use -100 (ignore_index) for padding the labels
+        labels = pad_sequence(
+            batch_labels, batch_first=True, padding_value=self.ignore_index
+        )
+
+        output_batch = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "task": task_name
+        }
+        
+        return output_batch
