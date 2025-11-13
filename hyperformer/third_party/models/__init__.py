@@ -1,2 +1,2 @@
-from .modeling_t5 import T5ForConditionalGeneration
-from .configuration_t5 import T5Config
+from .modeling_gemma import Gemma3ForConditionalGeneration
+from .config_gemma3 import Gemma3TextConfig

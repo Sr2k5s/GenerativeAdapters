@@ -43,7 +43,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 
 # --- adapter controllers (hyperformer) ---
-from hyperformer.adapters import (
+from adapters import (
     AutoAdapterController,
     MetaAdapterConfig,
     TaskEmbeddingController,
@@ -53,7 +53,7 @@ from hyperformer.adapters import (
 )
 
 # --- your local config for Gemma-3 text ---
-from config_gemma3 import Gemma3TextConfig
+from .config_gemma3 import Gemma3TextConfig
 
 
 logger = logging.get_logger(__name__)
@@ -361,7 +361,7 @@ class Gemma2Model(Gemma2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,

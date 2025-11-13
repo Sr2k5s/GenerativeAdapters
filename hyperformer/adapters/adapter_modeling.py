@@ -83,7 +83,7 @@ class AdapterLayersHyperNetController(nn.Module):
         self.device = config.device
         self.task_embedding_dim = config.task_embedding_dim
         self.layer_id_embeddings = nn.Embedding(self.num_layers,
-                                                self.task_embedding_dim).to(self.device)
+                                                self.task_embedding_dim).to_empty(device=self.device)
         # self.token_type_embeddings = nn.Embedding(self.max_position_embeddings,
         #                                          self.task_embedding_dim).to(self.device)
         config.task_embedding_dim = self.task_embedding_dim * 2
@@ -165,9 +165,9 @@ class AdapterLayersOneHyperNetController(nn.Module):
         self.device = config.device
         self.task_embedding_dim = config.task_embedding_dim
         self.layer_id_embeddings = nn.Embedding(self.num_layers,
-                                                self.task_embedding_dim).to(self.device)
+                                                self.task_embedding_dim).to_empty(device=self.device)
         # This is 2 types of adapters for feed-forward, and self-attention.
-        self.adapters_block_type = nn.Embedding(2, self.task_embedding_dim).to(self.device)
+        self.adapters_block_type = nn.Embedding(2, self.task_embedding_dim).to_empty(device=self.device)
 
         config.task_embedding_dim = self.task_embedding_dim * 3
         self.task_hypernet = TaskHyperNet(config)

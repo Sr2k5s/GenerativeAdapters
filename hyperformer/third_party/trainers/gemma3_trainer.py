@@ -25,8 +25,8 @@ from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedModel, logging
 from transformers import Trainer
-from transformers.configuration_fsmt import FSMTConfig # From T5Trainer
-from transformers.utils import is_torch_tpu_available
+# from transformers.configuration_fsmt import FSMTConfig # From T5Trainer
+# from transformers.utils.import_utils import is_torch_tpu_available
 from typing import Any, Dict, Optional, Tuple, Union
 from torch.utils.data.dataset import Dataset
 
@@ -34,15 +34,14 @@ from transformers.trainer_callback import TrainerState
 from transformers.trainer_utils import (TrainOutput)
 from transformers.trainer_utils import (set_seed)
 from transformers.integrations import (hp_params)
-
+from torch.optim import AdamW
 # --- Dependencies from your T5Trainer ---
-from hyperformer.adapters import MetaAdapterConfig
-from hyperformer.utils import use_task_specific_params, reset_config
-from hyperformer.data import MultiTaskBatchSampler
+from adapters import MetaAdapterConfig
+from utils import use_task_specific_params, reset_config
+from data import MultiTaskBatchSampler
 # We also need the optimizers and schedulers from the T5Trainer
 from transformers.optimization import (
     Adafactor,
-    AdamW,
     get_constant_schedule,
     get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
@@ -77,7 +76,7 @@ arg_to_scheduler = {
 # --- End T5Trainer dependencies ---
 
 
-if is_torch_tpu_available():
+if False:
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
@@ -343,7 +342,7 @@ class GemmaAdapterKDTrainer(Trainer):
             )
 
         # Train!
-        if is_torch_tpu_available():
+        if False:
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
         else:
             total_train_batch_size = (
@@ -414,7 +413,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     train_dataloader.batch_sampler.set_epoch(epoch)
             # ---
 
-            if is_torch_tpu_available():
+            if False:
                 parallel_loader = pl.ParallelLoader(train_dataloader, [self.args.device]).per_device_loader(
                     self.args.device
                 )
@@ -464,7 +463,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     else:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
 
-                    if is_torch_tpu_available():
+                    if False:
                         xm.optimizer_step(self.optimizer)
                     elif self.args.fp16 and _use_native_amp:
                         self.scaler.step(self.optimizer)
@@ -487,7 +486,7 @@ class GemmaAdapterKDTrainer(Trainer):
             self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
 
             if self.args.tpu_metrics_debug or self.args.debug:
-                if is_torch_tpu_available():
+                if False:
                     xm.master_print(met.metrics_report())
                 else:
                     logger.warning(
@@ -644,12 +643,12 @@ class GemmaAdapterKDTrainer(Trainer):
         if self.dataset_sizes is None:
             return super()._get_train_sampler()
             
-        if is_torch_tpu_available() and xm.xrt_world_size() > 1:
+        if False and xm.xrt_world_size() > 1:
             num_replicas = xm.xrt_world_size()
             rank = xm.get_ordinal()
         elif self.args.local_rank != -1:
-            num_replicas = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
+            num_replicas = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         else:
             num_replicas = 1
             rank = 0

@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from hyperformer.adapters import ADAPTER_CONFIG_MAPPING
+from adapters import ADAPTER_CONFIG_MAPPING
 from transformers import TrainingArguments
 from transformers.optimization import (
     get_constant_schedule,
@@ -81,8 +81,9 @@ class Seq2SeqTrainingArguments(TrainingArguments):
     compute_memory: Optional[bool] = field(default=False,
                                            metadata={"help": "If specified, measures the memory needed."})
     compute_time: Optional[bool] = field(default=False, metadata={"help": "If specified, measures the time needed."})
-
-
+    evaluation_strategy: Optional[str] = field(default="no", metadata={"help": "The evaluation strategy to adopt."})
+    save_strategy: Optional[str] = field(default="steps", metadata={"help": "The checkpoint save strategy to adopt."})
+    
 @dataclass
 class ModelArguments:
     """
@@ -171,7 +172,7 @@ class DataTrainingArguments:
         default=True,
         metadata={"help": "If only pad tokens should be ignored. This assumes that `config.pad_token_id` is defined."},
     )
-    data_seed: Optional[int] = field(default=42, metadata={"help": "The seed used to subsample the datasets."})
+    dataseed: Optional[int] = field(default=42, metadata={"help": "The seed used to subsample the datasets."})
 
 
 @dataclass

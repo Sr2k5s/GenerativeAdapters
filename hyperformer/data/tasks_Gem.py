@@ -1,3 +1,7 @@
+
+#["dart", "web_nlg", "e2e_nlg", "totto", "cs_restaurants", "turku_hockey_data2text", "mlb_data_to_text", "xsum", "xlsum", "mlsum", "xwikis", "wiki_lingua", "wiki_cat_sum", "schema_guided_dialog", "conversational_weather", "opusparcus", "squad_v2", "wiki_auto_asset_turk"]
+
+
 # hyperformer/data/tasks_Gem.py
 # -*- coding: utf-8 -*-
 """
@@ -27,7 +31,7 @@ import datasets
 import numpy as np
 import torch
 
-from hyperformer.metrics import metrics  # your existing metric wrappers
+from metrics import metrics  # your existing metric wrappers
 from .utils import compute_task_max_decoding_length  # your existing helper
 
 logger = logging.getLogger(__name__)
@@ -405,3 +409,6 @@ def main():
 #if __name__ == "__main__":
 #    main()
 """
+
+
+
