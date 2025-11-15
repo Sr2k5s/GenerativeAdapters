@@ -1,4 +1,4 @@
-"""T5 model congfiguration"""
+""" model congfiguration"""
 
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 

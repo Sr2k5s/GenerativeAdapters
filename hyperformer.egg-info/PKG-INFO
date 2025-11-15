@@ -1,0 +1,76 @@
+Metadata-Version: 2.4
+Name: hyperformer
+Version: 0.0.1
+Summary: HyperFormer
+License: MIT License
+Keywords: text nlp machinelearning
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy==1.23.5
+Requires-Dist: scipy==1.10.1
+Requires-Dist: pandas==1.5.3
+Requires-Dist: scikit-learn==1.3.2
+Requires-Dist: matplotlib==3.7.3
+Requires-Dist: pillow==10.2.0
+Requires-Dist: tqdm==4.66.4
+Requires-Dist: torch==2.2.2
+Requires-Dist: torchvision==0.17.2
+Requires-Dist: torchaudio==2.2.2
+Requires-Dist: pytorch-lightning==2.1.3
+Requires-Dist: typing-extensions>=4.8.0
+Requires-Dist: transformers==4.40.2
+Requires-Dist: datasets==2.16.1
+Requires-Dist: sentencepiece==0.2.0
+Requires-Dist: tokenizers==0.19.1
+Requires-Dist: sacrebleu==2.4.0
+Requires-Dist: sacremoses==0.1.1
+Requires-Dist: rouge-score==0.1.2
+Requires-Dist: nltk==3.8.1
+Requires-Dist: regex==2023.10.3
+Requires-Dist: tensorboard==2.15.2
+Requires-Dist: tensorboard-data-server==0.7.2
+Requires-Dist: tensorboard-plugin-wit==1.8.1
+Requires-Dist: absl-py==2.1.0
+Requires-Dist: click==8.1.7
+Requires-Dist: filelock==3.13.1
+Requires-Dist: fsspec==2023.9.2
+Requires-Dist: portalocker==2.8.2
+Requires-Dist: protobuf==4.25.3
+Requires-Dist: packaging==24.1
+Requires-Dist: requests==2.32.3
+Requires-Dist: urllib3==2.2.1
+Requires-Dist: idna==3.6
+Requires-Dist: certifi==2024.7.4
+Requires-Dist: charset-normalizer==3.3.2
+Requires-Dist: future==0.18.3
+Requires-Dist: xxhash==3.4.1
+Requires-Dist: joblib==1.4.2
+Requires-Dist: threadpoolctl==3.5.0
+Requires-Dist: google-auth==2.29.0
+Requires-Dist: google-auth-oauthlib==1.2.0
+Requires-Dist: oauthlib==3.2.2
+Requires-Dist: Werkzeug==3.0.3
+Requires-Dist: markdown==3.6
+Requires-Dist: importlib-metadata==7.2.0
+Requires-Dist: zipp==3.19.2
+Requires-Dist: pyparsing==3.1.2
+Requires-Dist: python-dateutil==2.9.0.post0
+Requires-Dist: rsa==4.9
+Requires-Dist: gitpython==3.1.43
+Requires-Dist: smmap==5.0.1
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary
+
+hyperformer

@@ -25,24 +25,24 @@ from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedModel, logging
 from transformers import Trainer
-from transformers.configuration_fsmt import FSMTConfig # From T5Trainer
-from transformers.utils import is_torch_tpu_available
+# from transformers.configuration_fsmt import FSMTConfig # From T5Trainer
+# from transformers.utils.import_utils import is_torch_tpu_available
 from typing import Any, Dict, Optional, Tuple, Union
 from torch.utils.data.dataset import Dataset
-
+from typing import List
 from transformers.trainer_callback import TrainerState
 from transformers.trainer_utils import (TrainOutput)
 from transformers.trainer_utils import (set_seed)
 from transformers.integrations import (hp_params)
-
+from torch.optim import AdamW
 # --- Dependencies from your T5Trainer ---
-from hyperformer.adapters import MetaAdapterConfig
-from hyperformer.utils import use_task_specific_params, reset_config
-from hyperformer.data import MultiTaskBatchSampler
+from adapters import MetaAdapterConfig
+from utils import use_task_specific_params, reset_config
+from data import MultiTaskBatchSampler
+from tqdm.auto import tqdm
 # We also need the optimizers and schedulers from the T5Trainer
 from transformers.optimization import (
     Adafactor,
-    AdamW,
     get_constant_schedule,
     get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
@@ -77,7 +77,7 @@ arg_to_scheduler = {
 # --- End T5Trainer dependencies ---
 
 
-if is_torch_tpu_available():
+if False:
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
@@ -150,7 +150,7 @@ class GemmaAdapterKDTrainer(Trainer):
     # This is the new KD-aware loss function.
     # It assumes `inputs` contains `labels` (with -100) and
     # any adapter-specific keys (like `task`) from the dataloader.
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         Computes the combined Knowledge Distillation loss.
         
@@ -186,7 +186,12 @@ class GemmaAdapterKDTrainer(Trainer):
             teacher_logits = teacher_outputs.logits
 
         # 2. Distillation Loss (Student vs. Teacher)
-        
+
+        #clipping the last 64 tokens for dimension equivalance
+        student_vocab_size = student_logits.shape[-1]
+        if teacher_logits.shape[-1] > student_vocab_size:
+            teacher_logits = teacher_logits[:, :, :student_vocab_size]
+
         # Apply temperature and log-softmax
         soft_student_logits = F.log_softmax(student_logits / self.temperature, dim=-1)
         soft_teacher_logits = F.log_softmax(teacher_logits / self.temperature, dim=-1)
@@ -230,20 +235,32 @@ class GemmaAdapterKDTrainer(Trainer):
         results = {}
         if eval_datasets is None:
             eval_datasets = self.eval_dataset
+        model_config = self.model.config
+        
+        task_iterator = tqdm(
+            eval_datasets.items(),
+            desc="Evaluating tasks",
+            disable=not self.is_world_process_zero()  # only show on rank 0
+        )   
 
-        for eval_task, eval_dataset in eval_datasets.items():
+        for eval_task, eval_dataset in task_iterator:
+            dataset_size = len(eval_dataset)
+            print(f"\n🔍 Evaluating task: {eval_task} | size = {dataset_size} examples\n")
+
+            # Also update tqdm postfix with dataset size
+            task_iterator.set_postfix({"task": eval_task, "size": dataset_size})
+
             self.compute_metrics = self.multi_task_compute_metrics[eval_task]
-            model_config = self.model.config
-
+            
             # --- CRITICAL ADAPTER LOGIC ---
             use_task_specific_params(self.model, eval_task) ## Dicey ==> Update func?
             # ---
-
+            print("hi1")
             if eval_dataset is not None and not isinstance(eval_dataset, collections.abc.Sized):
                 raise ValueError("eval_dataset must implement __len__")
-
+            print("hi2")
             eval_dataloader = self.get_eval_dataloader(eval_dataset)
-
+            print("hi3")
             output = self.prediction_loop(
                 eval_dataloader,
                 description="Evaluation",
@@ -251,16 +268,27 @@ class GemmaAdapterKDTrainer(Trainer):
             )
             if self.args.tpu_metrics_debug or self.args.debug:
                 xm.master_print(met.metrics_report())
-
+            print("hi3")
+            print(f"Output : {output}")
             tasks_metric = {eval_task + "_" + k: v for k, v in output.metrics.items()}
             for key in sorted(tasks_metric.keys()):
+                print("hi3.1")
                 logger.info(f"  {key} = {tasks_metric[key]}")
+            print("hi4")
             results.update(tasks_metric)
-            
+            if len(tasks_metric) > 0:
+                main_key = sorted(tasks_metric.keys())[0]
+                task_iterator.set_postfix({
+                    "task": eval_task,
+                    "size": dataset_size,
+                    main_key: tasks_metric[main_key]
+                })
             # --- CRITICAL ADAPTER LOGIC ---
             reset_config(self.model, model_config)
             # ---
-
+            
+            break
+        print("I am out of here")
         # Computes the average metrics across all the tasks without their corresponding losses.
         metrics = [results[key] for key in results.keys() if "loss" not in key]
         if len(metrics) > 0:
@@ -278,7 +306,7 @@ class GemmaAdapterKDTrainer(Trainer):
         """
         # This might change the seed so needs to run first.
         self._hp_search_setup(trial)
-
+        self.current_gradient_accumulation_steps = self.args.gradient_accumulation_steps
         # Model re-init
         if self.model_init is not None:
             # Seed must be set before instantiating the model when using model_init.
@@ -330,7 +358,7 @@ class GemmaAdapterKDTrainer(Trainer):
             model = torch.nn.DataParallel(model)
 
         # Distributed training (should be after apex fp16 initialization)
-        if self.args.local_rank != -1:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
             model = torch.nn.parallel.DistributedDataParallel(
                 model,
                 device_ids=[self.args.local_rank],
@@ -343,13 +371,13 @@ class GemmaAdapterKDTrainer(Trainer):
             )
 
         # Train!
-        if is_torch_tpu_available():
+        if False:
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
         else:
             total_train_batch_size = (
                 self.args.train_batch_size
                 * self.args.gradient_accumulation_steps
-                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
+                * (torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1)
             )
 
         num_examples = (
@@ -365,6 +393,9 @@ class GemmaAdapterKDTrainer(Trainer):
         logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d", total_train_batch_size)
         logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
         logger.info("  Total optimization steps = %d", max_steps)
+        # HF Trainer API >= 4.41 expects a start_time passed to _maybe_log_save_evaluate
+        import time
+        start_time = time.time()
 
         self.state.epoch = 0
         epochs_trained = 0
@@ -394,6 +425,7 @@ class GemmaAdapterKDTrainer(Trainer):
 
         tr_loss = torch.tensor(0.0).to(self.args.device)
         self._logging_loss_scalar = 0
+        self._total_loss_scalar = 0.0
         self._globalstep_last_logged = 0
         self._total_flos = self.state.total_flos
         model.zero_grad()
@@ -414,7 +446,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     train_dataloader.batch_sampler.set_epoch(epoch)
             # ---
 
-            if is_torch_tpu_available():
+            if False:
                 parallel_loader = pl.ParallelLoader(train_dataloader, [self.args.device]).per_device_loader(
                     self.args.device
                 )
@@ -430,6 +462,8 @@ class GemmaAdapterKDTrainer(Trainer):
             self.control = self.callback_handler.on_epoch_begin(self.args, self.state, self.control)
 
             for step, inputs in enumerate(epoch_iterator):
+                #heyya
+                grad_norm_for_log = None
 
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -456,15 +490,16 @@ class GemmaAdapterKDTrainer(Trainer):
                     steps_in_epoch <= self.args.gradient_accumulation_steps
                     and (step + 1) == steps_in_epoch
                 ):
+                    # Return value of clip_grad_norm_ is the total norm; log it if available
                     if self.args.fp16 and _use_native_amp:
                         self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+                        grad_norm_for_log = torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
                     elif self.args.fp16 and _use_apex:
-                        torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), self.args.max_grad_norm)
+                        grad_norm_for_log = torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), self.args.max_grad_norm)
                     else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+                        grad_norm_for_log = torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
 
-                    if is_torch_tpu_available():
+                    if False:
                         xm.optimizer_step(self.optimizer)
                     elif self.args.fp16 and _use_native_amp:
                         self.scaler.step(self.optimizer)
@@ -477,17 +512,37 @@ class GemmaAdapterKDTrainer(Trainer):
                     self.state.global_step += 1
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
-
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+                    print("I am here")
+                    # New signature: (tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None)
+                    self._maybe_log_save_evaluate(
+                        tr_loss,
+                        grad_norm_for_log,
+                        model,
+                        trial,
+                        epoch,
+                        self.args.ignore_keys_for_eval if hasattr(self.args, "ignore_keys_for_eval") else None,
+                        start_time,
+                    )
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
-            
+                # print(f"the model looks like this post training : {model}")
+                break
+            print("I am out of loop")
             self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+            # Epoch-end call (grad_norm not meaningful here → None)
+            self._maybe_log_save_evaluate(
+                tr_loss,
+                None,
+                model,
+                trial,
+                epoch,
+                self.args.ignore_keys_for_eval if hasattr(self.args, "ignore_keys_for_eval") else None,
+                start_time,
+            )
 
             if self.args.tpu_metrics_debug or self.args.debug:
-                if is_torch_tpu_available():
+                if False:
                     xm.master_print(met.metrics_report())
                 else:
                     logger.warning(
@@ -496,7 +551,8 @@ class GemmaAdapterKDTrainer(Trainer):
                     )
             if self.control.should_training_stop:
                 break
-
+            break
+        print("I am fully out")
         if self.args.past_index and hasattr(self, "_past"):
             delattr(self, "_past")
 
@@ -527,7 +583,11 @@ class GemmaAdapterKDTrainer(Trainer):
 
         self.control = self.callback_handler.on_train_end(self.args, self.state, self.control)
 
-        return TrainOutput(self.state.global_step, tr_loss.item() / self.state.global_step)
+        return TrainOutput(
+            global_step=self.state.global_step,
+            training_loss=tr_loss.item() / max(self.state.global_step, 1),
+            metrics={}
+        )
     # --- [Point 4: Prediction Step] ---
     # This is the merged prediction_step. It handles adapter
     # kwargs *and* calls the KD-aware `compute_loss`.
@@ -535,64 +595,59 @@ class GemmaAdapterKDTrainer(Trainer):
         self,
         model: nn.Module,
         inputs: Dict[str, Union[torch.Tensor, Any]],
-        prediction_loss_only: bool
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
     ) -> Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Perform an evaluation step.
-        
-        MERGED:
-        - Takes adapter logic from T5Trainer (gen_kwargs).
-        - Takes KD logic from GemmaKDTrainer (calls self.compute_loss).
-        """
+
         inputs = self._prepare_inputs(inputs)
-        
-        # --- ADAPTER LOGIC from T5Trainer ---
+
+        # Generation kwargs
         gen_kwargs = {
-            "max_length": self.config.max_length,
-            "num_beams": self.config.num_beams
+            "max_new_tokens": self.model.config.max_length,  # FIXED
+            "num_beams": 1,
         }
-        # This is the key part: get task and task_embedding
+
         if "task" in inputs:
             gen_kwargs["task"] = inputs["task"]
-        if self.config.train_adapters and isinstance(self.adapter_config, MetaAdapterConfig):
-             gen_kwargs["task_embedding"] = model.task_embedding_controller(inputs["task"])
+
+        if self.model.config.train_adapters and isinstance(self.adapter_config, MetaAdapterConfig):
+            gen_kwargs["task_embedding"] = model.task_embedding_controller(inputs["task"])
         else:
-             gen_kwargs["task_embedding"] = None
-        # ---
-        
+            gen_kwargs["task_embedding"] = None
+
+        # Generation
+        generated_tokens = None
         if self.args.predict_with_generate and not prediction_loss_only:
             generated_tokens = model.generate(
                 inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
-                **gen_kwargs, # Pass adapter-aware kwargs
+                **gen_kwargs,
             )
-            # in case the batch is shorter than max length
-            if generated_tokens.shape[-1] < gen_kwargs["max_length"]:
-                generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_kwargs["max_length"])
 
-        
-        # --- KD LOGIC (replaces T5Trainer._compute_loss) ---
-        # We must pop labels *after* generate, but put them
-        # back for our new compute_loss method.
+        # Compute loss
         labels = inputs.pop("labels", None)
         if labels is not None:
-            inputs["labels"] = labels # Put it back in
-            
+            inputs["labels"] = labels
+
         with torch.no_grad():
-            # Call our overridden, KD-aware compute_loss
             loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
-        
+
         loss = loss.mean().detach()
+
         if prediction_loss_only:
             return (loss, None, None)
-        # ---
 
-        logits = generated_tokens if self.args.predict_with_generate else outputs.logits
+        # ---------- FIXED SECTION ----------
+        if self.args.predict_with_generate:
+            predictions = generated_tokens     # token IDs
+        else:
+            predictions = outputs.logits       # logits
 
-        if labels is not None and labels.shape[-1] < gen_kwargs["max_length"]:
-            labels = self._pad_tensors_to_max_len(labels, gen_kwargs["max_length"])
+        # Pad labels
+        if labels is not None and labels.shape[-1] < gen_kwargs["max_new_tokens"]:
+            labels = self._pad_tensors_to_max_len(labels, gen_kwargs["max_new_tokens"])
 
-        return (loss, logits, labels)
+        return (loss, predictions, labels)
 
     # --- [Point 5: Other Functions] ---
     # These are required functions from your T5Trainer
@@ -644,12 +699,12 @@ class GemmaAdapterKDTrainer(Trainer):
         if self.dataset_sizes is None:
             return super()._get_train_sampler()
             
-        if is_torch_tpu_available() and xm.xrt_world_size() > 1:
+        if False and xm.xrt_world_size() > 1:
             num_replicas = xm.xrt_world_size()
             rank = xm.get_ordinal()
         elif self.args.local_rank != -1:
-            num_replicas = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
+            num_replicas = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         else:
             num_replicas = 1
             rank = 0

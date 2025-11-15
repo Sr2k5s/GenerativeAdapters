@@ -2,16 +2,16 @@ import glob
 import os
 from dataclasses import asdict
 from logging import getLogger
-from hyperformer.third_party.utils import (
+from third_party.utils import (
     assert_all_frozen,
     freeze_embeds,
     freeze_params,
     save_json)
-from transformers.modeling_t5 import T5LayerNorm
+from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
 
-from hyperformer.adapters import (AdapterController, MetaAdapterController, 
+from adapters import (AdapterController, MetaAdapterController, 
                               AdapterLayersHyperNetController, AdapterLayersOneHyperNetController)
-from hyperformer.data import TASK_MAPPING
+from data import TASKS
 
 logger = getLogger(__name__)
 
@@ -85,7 +85,7 @@ def get_last_checkpoint_path(output_dir):
 
 def use_task_specific_params(model, task):
     """Update config with task specific params during evaluation."""
-    task_dataset = TASK_MAPPING[task]
+    task_dataset = TASKS[task]
     task_specific_config = task_dataset.task_specific_config
     if task_specific_config is not None:
         logger.info(f"using task specific params for {task}: {task_specific_config}")
@@ -109,16 +109,20 @@ def freezing_params(model, training_args, model_args, adapter_args):
     """
     # If we are training adapters, we freeze all parameters except the
     # parameters of computing task embeddings and adapter controllers.
+    logger.info("I am here 1")
     if training_args.train_adapters:
         freeze_params(model)
+        logger.info("I am here 1.1")
         for name, sub_module in model.named_modules():
             if isinstance(sub_module, (MetaAdapterController, AdapterController)):
                 for param_name, param in sub_module.named_parameters():
                     param.requires_grad = True
         if adapter_args.adapter_config_name == "meta-adapter":
+            logger.info("I am here 1.3")
             for param in model.task_embedding_controller.parameters():
                 param.requires_grad = True
         if adapter_args.unique_hyper_net:
+            logger.info("I am here 1.2")
             for name, sub_module in model.named_modules():
                 if isinstance(sub_module, (AdapterLayersHyperNetController, AdapterController)):
                     for param_name, param in sub_module.named_parameters():
@@ -128,6 +132,8 @@ def freezing_params(model, training_args, model_args, adapter_args):
                 if isinstance(sub_module, (AdapterLayersOneHyperNetController)):
                     for param_name, param in sub_module.named_parameters():
                         param.requires_grad = True
+
+    logger.info("I am here 2")
     if model_args.freeze_model:
         freeze_params(model)
 
@@ -161,7 +167,7 @@ def freezing_params(model, training_args, model_args, adapter_args):
     # Unfreezes layer norms.
     if model_args.unfreeze_layer_norms:
         for name, sub_module in model.named_modules():
-            if isinstance(sub_module, T5LayerNorm):
+            if isinstance(sub_module, Gemma2RMSNorm):
                 for param_name, param in sub_module.named_parameters():
                     param.requires_grad = True
 

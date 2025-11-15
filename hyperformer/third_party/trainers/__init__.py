@@ -1,1 +1,1 @@
-from .t5_trainer import T5Trainer
+from .gemma3_trainer import GemmaAdapterKDTrainer

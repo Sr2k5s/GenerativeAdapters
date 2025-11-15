@@ -799,17 +799,23 @@ class TaskCollator_gemma:
             batch_labels.append(torch.tensor(labels))
 
         # 6. Pad the batch
-        # We use the tokenizer's pad_token_id for inputs and mask
-        input_ids = pad_sequence(
-            batch_input_ids, batch_first=True, padding_value=self.pad_token_id
-        )
-        attention_mask = pad_sequence(
-            batch_attention_mask, batch_first=True, padding_value=0
-        )
-        # We use -100 (ignore_index) for padding the labels
-        labels = pad_sequence(
-            batch_labels, batch_first=True, padding_value=self.ignore_index
-        )
+        def left_pad(sequences, pad_value):
+            max_len = max(seq.size(0) for seq in sequences)
+            padded = []
+            for seq in sequences:
+                pad_len = max_len - seq.size(0)
+                pad = torch.full((pad_len,), pad_value, dtype=seq.dtype)
+                padded.append(torch.cat([pad, seq], dim=0))
+            return torch.stack(padded, dim=0)
+
+        # Pad input_ids with pad_token_id
+        input_ids = left_pad(batch_input_ids, self.pad_token_id)
+
+        # Pad attention_mask with 0
+        attention_mask = left_pad(batch_attention_mask, 0)
+
+        # Pad labels with ignore_index (-100)
+        labels = left_pad(batch_labels, self.ignore_index)
 
         output_batch = {
             "input_ids": input_ids,

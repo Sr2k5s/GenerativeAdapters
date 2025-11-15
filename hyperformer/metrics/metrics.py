@@ -5,7 +5,7 @@ import scipy
 import math
 import sklearn
 from logging import getLogger
-from hyperformer.third_party.utils import calculate_rouge, calculate_bleu, lmap
+from third_party.utils import calculate_rouge, calculate_bleu, lmap
 from transformers import EvalPrediction, PreTrainedTokenizer
 from typing import Callable, Dict, List, Tuple
 
@@ -104,9 +104,9 @@ def build_compute_metrics_fn(task_names: List[str],
         return eval_results
 
     def tasks_metrics(task) -> Dict:
-        from data.tasks import TASK_MAPPING
+        from data.tasks_Gem import TASKS
         from data.postprocessors import get_post_processor
-        return functools.partial(compute_metrics, metrics=TASK_MAPPING[task].metrics,
+        return functools.partial(compute_metrics, metrics=TASKS[task].metrics,
                                  post_processor=get_post_processor(task))
 
     return {task: tasks_metrics(task) for task in task_names}

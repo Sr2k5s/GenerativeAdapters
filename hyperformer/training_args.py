@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from hyperformer.adapters import ADAPTER_CONFIG_MAPPING
+from adapters import ADAPTER_CONFIG_MAPPING
 from transformers import TrainingArguments
 from transformers.optimization import (
     get_constant_schedule,
@@ -81,6 +81,8 @@ class Seq2SeqTrainingArguments(TrainingArguments):
     compute_memory: Optional[bool] = field(default=False,
                                            metadata={"help": "If specified, measures the memory needed."})
     compute_time: Optional[bool] = field(default=False, metadata={"help": "If specified, measures the time needed."})
+    evaluation_strategy: Optional[str] = field(default="no", metadata={"help": "The evaluation strategy to adopt."})
+    save_strategy: Optional[str] = field(default="steps", metadata={"help": "The checkpoint save strategy to adopt."})
 
 
 @dataclass
@@ -92,7 +94,7 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-    not_load_t5_checkpoint: bool = field(default=False, metadata={"help": "whether to load the checkpoint."})
+    not_load_t5_checkpoint: bool = field(default=True, metadata={"help": "whether to load the checkpoint."})
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
     )
@@ -163,15 +165,15 @@ class DataTrainingArguments:
                     "than this will be truncated, sequences shorter will be padded."
         },
     )
-    n_train: Optional[int] = field(default=-1, metadata={"help": "# training examples. -1 means use all."})
-    n_val: Optional[int] = field(default=-1, metadata={"help": "# validation examples. -1 means use all."})
-    n_test: Optional[int] = field(default=-1, metadata={"help": "# test examples. -1 means use all."})
-    eval_beams: Optional[int] = field(default=None, metadata={"help": "# num_beams to use for evaluation."})
+    n_train: Optional[int] = field(default=100, metadata={"help": "# training examples. -1 means use all."})
+    n_val: Optional[int] = field(default=100, metadata={"help": "# validation examples. -1 means use all."})
+    n_test: Optional[int] = field(default=100, metadata={"help": "# test examples. -1 means use all."})
+    eval_beams: Optional[int] = field(default=1, metadata={"help": "# num_beams to use for evaluation."})
     ignore_pad_token_for_loss: bool = field(
         default=True,
         metadata={"help": "If only pad tokens should be ignored. This assumes that `config.pad_token_id` is defined."},
     )
-    data_seed: Optional[int] = field(default=42, metadata={"help": "The seed used to subsample the datasets."})
+    dataseed: Optional[int] = field(default=42, metadata={"help": "The seed used to subsample the datasets."})
 
 
 @dataclass

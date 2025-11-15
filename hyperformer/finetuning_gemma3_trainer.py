@@ -17,32 +17,41 @@ from transformers.trainer_utils import EvaluationStrategy
 
 ### GEMMA: Import your custom adapter-Gemma model and its config
 # (Update 'gemma_adapter_model' to your actual file name)
-from hyperformer.third_party.models.modeling_gemma import Gemma3TextConfig, Gemma3ForCausalLM 
+from third_party.models.modeling_gemma import Gemma3TextConfig, Gemma3ForConditionalGeneration 
 
 ### GEMMA: Import the *standard* Gemma model for the teacher
-from transformers import GemmaForCausalLM as StandardGemmaForCausalLM
+from transformers import Gemma3ForConditionalGeneration as StandardGemmaForConditionalGeneration
 
 ### GEMMA: Import the new KD Trainer
 # (Update 'gemma_kd_trainer' to your actual file name)
-from hyperformer.third_party.trainers.gemma3_trainer import GemmaAdapterKDTrainer
+from third_party.trainers.gemma3_trainer import GemmaAdapterKDTrainer
 
-from hyperformer.adapters import AdapterController, AutoAdapterConfig
-from hyperformer.data import AutoTask
+from adapters import AdapterController, AutoAdapterConfig
+from data import AutoTask
 
 ### WARNING: This collator MUST be updated for Gemma (CausalLM)
 # It needs to create 'labels' from 'input_ids' and use -100 for masking
 # in addition to adding the 'task' field.
-from hyperformer.third_party.utils import TaskCollator_gemma, check_output_dir
+from third_party.utils import TaskCollator_gemma, check_output_dir
 
-from hyperformer.metrics import build_compute_metrics_fn
-from hyperformer.training_args import Seq2SeqTrainingArguments, ModelArguments, DataTrainingArguments, \
+from metrics import build_compute_metrics_fn
+from training_args import Seq2SeqTrainingArguments, ModelArguments, DataTrainingArguments, \
     AdapterTrainingArguments, KDArguments
-from hyperformer.utils import freezing_params, get_last_checkpoint_path, create_dir,\
+from utils import freezing_params, get_last_checkpoint_path, create_dir,\
     handle_metrics, get_training_args
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("/Users/kabir.nagpal/Desktop/gen_adap/GenerativeAdapters/log.txt")
 
+import dataclasses  # <-- Add this import
+from adapters import MetaAdapterConfig  # <-- Import your config class (adjust path if needed)
+from transformers import GenerationConfig # <-- Make sure this is imported
 
+# --- MONKEY-PATCH ---
+# This dynamically adds the 'to_dict' method that transformers is looking for.
+def meta_adapter_config_to_dict(self):
+    return dataclasses.asdict(self)
+
+MetaAdapterConfig.to_dict = meta_adapter_config_to_dict
 def remove_rank_info_from_argv(args):
     extra_parameters = {}
     if args[1].startswith("--local_rank"):
@@ -61,6 +70,7 @@ def main():
         args_dict = json.loads(Path(sys.argv[1]).read_text())
         args_dict.update(rank_info)
         model_args, data_args, training_args, adapter_args, kd_args = parser.parse_dict(args_dict) # ### KD: Added kd_args
+        print(training_args)
     elif len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         logger.warning("config path: %s", sys.argv[1])
         model_args, data_args, training_args, adapter_args, kd_args = parser.parse_json_file( # ### KD: Added kd_args
@@ -69,7 +79,6 @@ def main():
         model_args, data_args, training_args, adapter_args, kd_args = parser.parse_args_into_dataclasses() # ### KD: Added kd_args
     check_output_dir(training_args)
     # --- End argument parsing ---
-
     # Setup logging (unchanged)
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -90,13 +99,14 @@ def main():
     set_seed(training_args.seed)
 
     # Load pretrained model and tokenizer
-    
+    print(model_args.config_name if model_args.config_name else model_args.model_name_or_path)
     ### GEMMA: Load Gemma config instead of T5
     config = Gemma3TextConfig.from_pretrained(
         model_args.config_name if model_args.config_name else \
             model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
     )
+    print(f"1b Config : {config}")
     
     # This logic for updating config remains valid for Gemma
     extra_model_params = ("encoder_layerdrop", "decoder_layerdrop", "dropout",
@@ -111,7 +121,7 @@ def main():
     # Adapter config logic (unchanged)
     if training_args.train_adapters:
         adapter_config = AutoAdapterConfig.get(adapter_args.adapter_config_name)
-        adapter_config.input_dim = config.d_model
+        adapter_config.input_dim = config.hidden_size
         adapter_config.tasks = data_args.tasks
         adapter_config.task_to_adapter = {task:adapter for task, adapter in zip(data_args.tasks, data_args.adapters)} if data_args.adapters is not None else None
         adapter_config.task_to_embeddings = {task:embedding for task, embedding in zip(data_args.tasks, data_args.task_embeddings)}\
@@ -138,13 +148,14 @@ def main():
         adapter_config.device = training_args.device
     else:
         adapter_config = None
-
+    print(model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path)
     # Load tokenizer (unchanged)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else \
             model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
     )
+    print(f"Parent Tokenizer: {len(tokenizer)}")
     
     ### GEMMA: Add pad token for CausalLM
     if tokenizer.pad_token is None:
@@ -156,13 +167,13 @@ def main():
     if model_args.not_load_t5_checkpoint:
         # Note: This flag name 'not_load_t5_checkpoint' is now confusing.
         # It really means 'load model from config only'
-        model = Gemma3ForCausalLM(config=config, adapter_config=adapter_config)
+        model = Gemma3ForConditionalGeneration(config=config, adapter_config=adapter_config)
     else:
         last_checkpoint_path = training_args.output_dir
         model_path = model_args.model_name_or_path if ((training_args.optimize_from_scratch and not training_args.optimize_from_scratch_with_loading_model) or not os.path.exists(os.path.join(last_checkpoint_path, 'pytorch_model.bin')))\
             else last_checkpoint_path
         logger.warning("model path loaded from : %s", model_path)
-        model = Gemma3ForCausalLM.from_pretrained(
+        model =   Gemma3ForConditionalGeneration.from_pretrained(
             model_path,
             from_tf=".ckpt" in model_args.model_name_or_path,
             config=config,
@@ -173,12 +184,16 @@ def main():
     ### KD: Load the Teacher Model
     logger.info(f"Loading teacher model from {kd_args.teacher_model_name_or_path}")
     # Use standard GemmaForCausalLM for the teacher
-    teacher_model = StandardGemmaForCausalLM.from_pretrained(
+    logger.info(model)
+    logger.info(kd_args.teacher_model_name_or_path)
+    teacher_model = StandardGemmaForConditionalGeneration.from_pretrained(
         kd_args.teacher_model_name_or_path,
         cache_dir=model_args.cache_dir,
         # Use a memory-efficient dtype for the teacher
         torch_dtype=torch.bfloat16, 
     )
+    
+    
     # Ensure teacher's pad token matches
     if teacher_model.config.pad_token_id is None:
         teacher_model.config.pad_token_id = teacher_model.config.eos_token_id
@@ -209,14 +224,14 @@ def main():
     if training_args.do_train:
         ### NOTE: The `add_prefix` arg might be T5-specific.
         # Your AutoTask class must handle this for Gemma.
-        train_datasets = [dataset_class.get(task, seed=data_args.data_seed).get_dataset(
+        train_datasets = [dataset_class.get(task, seed=data_args.dataseed).get_dataset(
             split="train", n_obs=data_args.n_train, add_prefix=False if training_args.train_adapters else True)
             for task in data_args.tasks]
         dataset_sizes = [len(train_dataset) for train_dataset in train_datasets]
         train_dataset = datasets.concatenate_datasets(train_datasets)
     training_args.remove_unused_columns = False
     
-    eval_datasets = ({task: dataset_class.get(task, seed=data_args.data_seed).get_dataset(
+    eval_datasets = ({task: dataset_class.get(task, seed=data_args.dataseed).get_dataset(
         split="validation", n_obs=data_args.n_val,
         add_prefix=False if training_args.train_adapters else True,
         split_validation_test=training_args.split_validation_test)
@@ -225,7 +240,7 @@ def main():
         else None)
     
     test_dataset = (
-        {task: dataset_class.get(task, seed=data_args.data_seed).get_dataset(
+        {task: dataset_class.get(task, seed=data_args.dataseed).get_dataset(
             split="test", n_obs=data_args.n_test,
             add_prefix=False if training_args.train_adapters else True,
             split_validation_test=training_args.split_validation_test)
@@ -248,7 +263,7 @@ def main():
         ### KD: Pass new arguments
         teacher_model=teacher_model,
         alpha_kd=kd_args.alpha_kd,
-        temperature=kd_args.temperature,
+        temperature=kd_args.temperature_kd,
         
         # --- Original arguments ---
         config=config,
@@ -280,17 +295,19 @@ def main():
             end = torch.cuda.Event(enable_timing=True)
             start.record()
             
+        print(f"Teacher : {teacher_model}")
+        print(f"Student : {model}")
         trainer.train(
             model_path=model_path \
                 if (os.path.exists(training_args.output_dir) and not training_args.optimize_from_scratch) else None,
         )
-        
+        print("hello 1")
         if training_args.compute_time: 
             torch.cuda.synchronize()
             end.record()
             total_time = {"total_time": start.elapsed_time(end)}
             print("###### total_time ", total_time)
-            
+        
         trainer.save_model()
         
         if trainer.is_world_process_zero():
@@ -303,14 +320,14 @@ def main():
         if trainer.is_world_process_zero():
             
             last_checkpoint_path = get_last_checkpoint_path(training_args.output_dir)
-            
+            print("I am heree.")
             ### GEMMA: Load Gemma config
             config = Gemma3TextConfig.from_pretrained(
                 last_checkpoint_path,
                 cache_dir=model_args.cache_dir)
             
             ### GEMMA: Load adapter-Gemma model
-            model = Gemma3ForCausalLM.from_pretrained(
+            model =   Gemma3ForConditionalGeneration.from_pretrained(
                 last_checkpoint_path,
                 from_tf=".ckpt" in training_args.output_dir,
                 config=config,
@@ -324,7 +341,7 @@ def main():
                 ### KD: Pass new arguments
                 teacher_model=teacher_model, # Teacher model is already loaded
                 alpha_kd=kd_args.alpha_kd,
-                temperature=kd_args.temperature,
+                temperature=kd_args.temperature_kd,
                 
                 # --- Original arguments ---
                 config=config,
@@ -347,20 +364,21 @@ def main():
                                          zip(data_args.eval_tasks, data_args.adapters)}
                     if isinstance(sub_module, AdapterController):
                         sub_module.set_task_to_adapter_map(task_to_adapter)
-
+    print("EVAL STARTS")
     # Evaluation loops (unchanged)
     if training_args.do_eval:
         metrics = trainer.evaluate()
         if trainer.is_world_process_zero():
+            print("Yo")
             handle_metrics("val", metrics, training_args.output_dir)
             all_metrics.update(metrics)
-
+    print("EVAL MID")
     if training_args.do_test:
         metrics = trainer.evaluate(test_dataset)
         if trainer.is_world_process_zero():
             handle_metrics("test", metrics, training_args.output_dir)
             all_metrics.update(metrics)
-
+    print("EVAL ENDS")
     if torch.cuda.is_available() and training_args.compute_memory:
         peak_memory = torch.cuda.max_memory_allocated()/1024**2
         print(

@@ -27,7 +27,7 @@ import datasets
 import numpy as np
 import torch
 
-from hyperformer.metrics import metrics  # your existing metric wrappers
+from metrics import metrics  # your existing metric wrappers
 from .utils import compute_task_max_decoding_length  # your existing helper
 
 logger = logging.getLogger(__name__)
@@ -226,9 +226,9 @@ class GEMGenericTask(AbstractTaskDataset):
 # Concrete Task Registry
 # -----------------------
 # Decoding defaults by type
-DECODING_SMALL = {"max_length": 64, "num_beams": 4}
-DECODING_MED = {"max_length": 128, "num_beams": 4}
-DECODING_LONG = {"max_length": 256, "num_beams": 4}
+DECODING_SMALL = {"max_length": 64, "num_beams": 1}
+DECODING_MED = {"max_length": 128, "num_beams": 1}
+DECODING_LONG = {"max_length": 256, "num_beams": 1}
 
 # Build a broad, practical subset of GEM tasks.
 # You can freely add more items here — they will auto-register.

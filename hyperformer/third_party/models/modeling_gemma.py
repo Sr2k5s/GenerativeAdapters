@@ -43,7 +43,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 
 # --- adapter controllers (hyperformer) ---
-from hyperformer.adapters import (
+from adapters import (
     AutoAdapterController,
     MetaAdapterConfig,
     TaskEmbeddingController,
@@ -53,7 +53,7 @@ from hyperformer.adapters import (
 )
 
 # --- your local config for Gemma-3 text ---
-from config_gemma3 import Gemma3TextConfig
+from .config_gemma3 import Gemma3TextConfig
 
 
 logger = logging.get_logger(__name__)
@@ -361,7 +361,7 @@ class Gemma2Model(Gemma2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -566,7 +566,7 @@ class Gemma3TextModel(Gemma3PreTrainedModel):
         task: Optional[str] = None,
         task_embedding: Optional[torch.Tensor] = None,
     ) -> BaseModelOutputWithPast:
-
+        # print(f"task_embedding shape {task_embedding.shape}")
         use_cache = self.config.use_cache if use_cache is None else use_cache
         output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
         output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
@@ -623,7 +623,7 @@ class Gemma3TextModel(Gemma3PreTrainedModel):
         # Precompute (cos, sin) for each attention type present in config.layer_types
         position_embeddings = {}
         for layer_type in self.config.layer_types:
-            position_embeddings[layer_type] = self.rotary_emb(inputs_embeds, position_ids, layer_type=layer_type)
+            position_embeddings[layer_type] = self.rotary_emb(inputs_embeds, position_ids) #####
 
         # --- Adapter hyper-net (per-layer) like T5Stack ---
         # If using unique/efficient hypernets, compute layer-specific adapter weights container
