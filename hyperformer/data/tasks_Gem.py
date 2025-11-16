@@ -18,15 +18,7 @@ from typing import Callable, Dict, Mapping, List
 # --- Metrics Stub ---
 # You will need to replace this with your actual metrics module/functions
 # (e.g., from `datasets.load_metric` or your own implementation)
-class StubMetrics:
-    def __getattr__(self, name):
-        def stub_metric(*args, **kwargs):
-            logging.warning(f"Metrics module not fully implemented. Called '{name}' as a stub.")
-            return 0.0
-        return stub_metric
-
-metrics = StubMetrics()
-# --------------------
+from metrics import metrics
 
 logger = logging.getLogger(__name__)
 

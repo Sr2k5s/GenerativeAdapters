@@ -775,7 +775,7 @@ class TaskCollator_gemma:
             train_mask  = [1] * len(train_input)
 
             # labels mask prompt and reveal target
-            train_labels = ([self.ignore_index] * len(p_ids)) + t_ids_eos
+            train_labels = ([self.ignore_index] *(len(p_ids))) + t_ids_eos
 
             batch_inp.append(torch.tensor(train_input))
             batch_att.append(torch.tensor(train_mask))
@@ -783,11 +783,14 @@ class TaskCollator_gemma:
 
             # ===== EVAL MODE =====
             # eval input = prompt only
-            eval_input = p_ids
+            eval_input = p_ids + [self.eos_token_id]
             eval_mask  = [1] * len(eval_input)
 
             # eval labels identical mask scheme
-            eval_labels = ([self.ignore_index] * len(p_ids)) + t_ids_eos
+            if(len(t_ids_eos)<len(eval_input)):
+                eval_labels = ([self.ignore_index] *(len(eval_input)- len(t_ids_eos)))+ t_ids_eos 
+            else:
+                eval_labels = t_ids_eos[:len(eval_input)]
 
             batch_inp_eval.append(torch.tensor(eval_input))
             batch_att_eval.append(torch.tensor(eval_mask))
