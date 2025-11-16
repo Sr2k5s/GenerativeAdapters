@@ -35,12 +35,10 @@
   "max_steps": 65536,
   "tasks": [
     "dart",
-    "web_nlg",
     "e2e_nlg"
   ],
   "eval_tasks": [
     "dart",
-    "web_nlg",
     "e2e_nlg"
   ],
   "train_adapters": true,

@@ -165,9 +165,9 @@ class DataTrainingArguments:
                     "than this will be truncated, sequences shorter will be padded."
         },
     )
-    n_train: Optional[int] = field(default=100, metadata={"help": "# training examples. -1 means use all."})
-    n_val: Optional[int] = field(default=100, metadata={"help": "# validation examples. -1 means use all."})
-    n_test: Optional[int] = field(default=100, metadata={"help": "# test examples. -1 means use all."})
+    n_train: Optional[int] = field(default=8, metadata={"help": "# training examples. -1 means use all."})
+    n_val: Optional[int] = field(default=8, metadata={"help": "# validation examples. -1 means use all."})
+    n_test: Optional[int] = field(default=8, metadata={"help": "# test examples. -1 means use all."})
     eval_beams: Optional[int] = field(default=1, metadata={"help": "# num_beams to use for evaluation."})
     ignore_pad_token_for_loss: bool = field(
         default=True,

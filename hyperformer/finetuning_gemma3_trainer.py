@@ -387,6 +387,7 @@ def main():
             "MB"
         )
         memory_usage = {"peak_memory": peak_memory}
+        print(f"memory usage : {memory_usage}")
     
     return all_metrics
 

@@ -260,7 +260,7 @@ class GemmaAdapterKDTrainer(Trainer):
                 raise ValueError("eval_dataset must implement __len__")
             print("hi2")
             eval_dataloader = self.get_eval_dataloader(eval_dataset)
-            print("hi3")
+            print("hi3.1")
             output = self.prediction_loop(
                 eval_dataloader,
                 description="Evaluation",
@@ -268,11 +268,11 @@ class GemmaAdapterKDTrainer(Trainer):
             )
             if self.args.tpu_metrics_debug or self.args.debug:
                 xm.master_print(met.metrics_report())
-            print("hi3")
+            print("hi3.2")
             print(f"Output : {output}")
             tasks_metric = {eval_task + "_" + k: v for k, v in output.metrics.items()}
             for key in sorted(tasks_metric.keys()):
-                print("hi3.1")
+                print("hi3.3")
                 logger.info(f"  {key} = {tasks_metric[key]}")
             print("hi4")
             results.update(tasks_metric)
@@ -720,6 +720,46 @@ class GemmaAdapterKDTrainer(Trainer):
         multitask_sampler = self._get_train_sampler()
         return DataLoader(self.train_dataset, batch_sampler=multitask_sampler,
                           collate_fn=self.data_collator)
+    
+    def get_eval_dataloader(self, eval_dataset: Optional[Union[str, Dataset]] = None) -> DataLoader:
+        """
+        Returns the evaluation dataloader but using evaluation tensors created
+        by the TaskCollator_gemma:
+            - input_ids_eval
+            - attention_mask_eval
+            - labels_eval
+
+        NOTE:
+        - We still call the original data_collator to build the batch.
+        - We wrap the collator to override the training fields.
+        """
+
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+
+        # ---------- WRAP ORIGINAL COLLATOR ----------
+        def eval_collate(batch):
+            # Run original TaskCollator_gemma => produces:
+            #  input_ids, attention_mask, labels, task,
+            #  input_ids_eval, attention_mask_eval, labels_eval
+            batch_out = self.data_collator(batch)
+
+            # Replace training tensors with evaluation ones
+            batch_out["input_ids"] = batch_out["input_ids_eval"]
+            batch_out["attention_mask"] = batch_out["attention_mask_eval"]
+            batch_out["labels"] = batch_out["labels_eval"]
+
+            # task stays the same
+            return batch_out
+
+        # ---------- RETURN DATA LOADER ----------
+        return DataLoader(
+            eval_dataset,
+            batch_size=8, ## Hard Code
+            shuffle=False,
+            collate_fn=eval_collate
+        )
+
 
     def _pad_tensors_to_max_len(self, tensor, max_length):
         # (Copied from T5Trainer, but uses self.pad_token_id)
@@ -731,3 +771,4 @@ class GemmaAdapterKDTrainer(Trainer):
         )
         padded_tensor[:, : tensor.shape[-1]] = tensor
         return padded_tensor
+    

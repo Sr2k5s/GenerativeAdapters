@@ -721,6 +721,40 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
     # tie-weights support
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
+class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
+    _checkpoint_conversion_mapping = {
+        "^language_model.model": "model.language_model",
+        "^vision_tower": "model.vision_tower",
+        "^multi_modal_projector": "model.multi_modal_projector",
+        "^language_model.lm_head": "lm_head",
+    }
+    _tied_weights_keys = ["lm_head.weight"]
+    accepts_loss_kwargs = False
+
+    def __init__(self, config, adapter_config=None):
+        super().__init__(config)
+        self.adapter_config = adapter_config
+        self.train_adapters = bool(getattr(config, "train_adapters", False))
+
+        if self.train_adapters and isinstance(adapter_config, MetaAdapterConfig):
+            self.task_embedding_controller = TaskEmbeddingController(adapter_config)
+        else:
+            self.task_embedding_controller = None
+
+        # Choose the right text config
+        self.text_config = getattr(config, "text_config", config)
+
+        # Text-only stack
+        self.model = Gemma3TextModel(self.text_config, adapter_config=adapter_config)
+
+        # LM head matches text dims
+        self.lm_head = nn.Linear(self.text_config.hidden_size, self.text_config.vocab_size, bias=False)
+
+        self.post_init()
+
+    # tie-weights support
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
@@ -761,7 +795,11 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
             and self.task_embedding_controller is not None
         ):
             task_embedding = self.task_embedding_controller(task)
+        ## Easy fix for lm_kwargs
+        keys_to_remove = ['input_ids_eval', 'attention_mask_eval', 'labels_eval']
 
+        for key in keys_to_remove:
+            lm_kwargs.pop(key, None)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
