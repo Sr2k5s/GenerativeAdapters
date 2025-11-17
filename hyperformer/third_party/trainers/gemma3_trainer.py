@@ -557,7 +557,8 @@ class GemmaAdapterKDTrainer(Trainer):
                             }
 
                             import json
-                            with open("train_debug.json", "w") as f:
+                            temp = "train_debug_" + str(step//10) + ".json"
+                            with open(temp, "w") as f:
                                 json.dump(debug_dump, f, indent=2)
 
                             print(f"[DEBUG] Saved train_debug.json at step {self.state.global_step}")
