@@ -35,11 +35,13 @@
   "max_steps": 65536,
   "tasks": [
     "dart",
-    "e2e_nlg"
+    "e2e_nlg",
+    "wiki_lingua"
   ],
   "eval_tasks": [
     "dart",
-    "e2e_nlg"
+    "e2e_nlg",
+    "wiki_lingua"
   ],
   "train_adapters": true,
   "adapter_config_name": "meta-adapter",

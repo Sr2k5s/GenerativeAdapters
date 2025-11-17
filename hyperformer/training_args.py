@@ -165,9 +165,9 @@ class DataTrainingArguments:
                     "than this will be truncated, sequences shorter will be padded."
         },
     )
-    n_train: Optional[int] = field(default=8, metadata={"help": "# training examples. -1 means use all."})
-    n_val: Optional[int] = field(default=8, metadata={"help": "# validation examples. -1 means use all."})
-    n_test: Optional[int] = field(default=8, metadata={"help": "# test examples. -1 means use all."})
+    n_train: Optional[int] = field(default=-1, metadata={"help": "# training examples. -1 means use all."})
+    n_val: Optional[int] = field(default=-1, metadata={"help": "# validation examples. -1 means use all."})
+    n_test: Optional[int] = field(default=-1, metadata={"help": "# test examples. -1 means use all."})
     eval_beams: Optional[int] = field(default=1, metadata={"help": "# num_beams to use for evaluation."})
     ignore_pad_token_for_loss: bool = field(
         default=True,
@@ -225,7 +225,7 @@ class KDArguments:
         default = "google/gemma-3-12b-it",metadata={"help": "Path to the pretrained teacher model for distillation."}
     )
     alpha_kd: float = field(
-        default=0.5, metadata={"help": "Weighting for the hard loss (CrossEntropy). (1-alpha) is for the soft loss (KLDiv)."}
+        default=0.2, metadata={"help": "Weighting for the hard loss (CrossEntropy). (1-alpha) is for the soft loss (KLDiv)."}
     )
     temperature_kd: float = field(
         default=2.0, metadata={"help": "Temperature for distillation."}

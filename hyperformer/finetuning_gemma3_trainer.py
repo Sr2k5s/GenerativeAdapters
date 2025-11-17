@@ -274,6 +274,7 @@ def main():
         compute_metrics=None, # Using multi-task one
         multi_task_compute_metrics=compute_metrics_fn,
         data_args=data_args,
+        tokenizer = tokenizer,
         dataset_sizes=dataset_sizes if training_args.do_train else None,
         adapter_config=adapter_config
     )
@@ -352,6 +353,7 @@ def main():
                 compute_metrics=None,
                 multi_task_compute_metrics=compute_metrics_fn,
                 data_args=data_args,
+                tokenizer = tokenizer,
                 dataset_sizes=dataset_sizes if training_args.do_train else None,
                 adapter_config=adapter_config
             )

@@ -102,6 +102,7 @@ class GemmaAdapterKDTrainer(Trainer):
         dataset_sizes=None,
         adapter_config=None,
         multi_task_compute_metrics=None,
+        tokenizer = None,
         
         *args,
         **kwargs
@@ -121,7 +122,7 @@ class GemmaAdapterKDTrainer(Trainer):
         self.multi_task_compute_metrics = multi_task_compute_metrics
         self.dataset_sizes = dataset_sizes
         self.data_args = data_args
-        
+        self.tokenizer = tokenizer
         # --- KD __init__ logic ---
         self.teacher_model = teacher_model
         self.alpha_kd = alpha_kd
@@ -513,6 +514,56 @@ class GemmaAdapterKDTrainer(Trainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
                     print("I am here")
+                    if step % 10 == 0:
+                        try:
+                            tokenizer = self.tokenizer
+
+                            # --------------------------
+                            # Prepare inputs (detach)
+                            # --------------------------
+                            input_ids = inputs["input_ids"].detach().cpu()
+                            labels = inputs["labels"].detach().cpu().numpy()
+
+                            # Replace ignore_index (-100) with pad token so decoding works
+                            labels = np.where(labels < 0, tokenizer.pad_token_id, labels)
+
+                            # --------------------------
+                            # Get student predictions
+                            # --------------------------
+                            with torch.no_grad():
+                                outputs = model(
+                                    input_ids=input_ids.to(self.args.device),
+                                    attention_mask=inputs["attention_mask"].to(self.args.device),
+                                    task=inputs["task"] if "task" in inputs else None
+                                )
+                                logits = outputs.logits
+                                preds = torch.argmax(logits, dim=-1).detach().cpu().numpy()
+
+                            # --------------------------
+                            # Decode
+                            # --------------------------
+                            pred_str = tokenizer.batch_decode(preds, skip_special_tokens=True)
+                            label_str = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+                            # --------------------------
+                            # JSON dump
+                            # --------------------------
+                            debug_dump = {
+                                "global_step": int(self.state.global_step),
+                                "batch_step": int(step),
+                                "task": inputs["task"][0] if "task" in inputs else None,
+                                "predictions": pred_str,
+                                "labels": label_str,
+                            }
+
+                            import json
+                            with open("train_debug.json", "w") as f:
+                                json.dump(debug_dump, f, indent=2)
+
+                            print(f"[DEBUG] Saved train_debug.json at step {self.state.global_step}")
+
+                        except Exception as e:
+                            print(f"[DEBUG ERROR] Could not log predictions: {e}")
                     # New signature: (tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None)
                     self._maybe_log_save_evaluate(
                         tr_loss,
@@ -526,8 +577,6 @@ class GemmaAdapterKDTrainer(Trainer):
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
-                # print(f"the model looks like this post training : {model}")
-                break
             print("I am out of loop")
             self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
             # Epoch-end call (grad_norm not meaningful here → None)
@@ -551,7 +600,6 @@ class GemmaAdapterKDTrainer(Trainer):
                     )
             if self.control.should_training_stop:
                 break
-            break
         print("I am fully out")
         if self.args.past_index and hasattr(self, "_past"):
             delattr(self, "_past")

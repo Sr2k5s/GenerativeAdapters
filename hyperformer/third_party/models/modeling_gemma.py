@@ -851,3 +851,46 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        # loss = None
+        # if labels is not None:
+        #     logits = logits.float()
+        #     shift_logits = logits[..., :-1, :]
+        #     shift_labels = labels[..., 1:]
+
+        #     if attention_mask is not None:
+        #         shift_attention_mask = attention_mask[:, -shift_logits.shape[1]:].to(logits.device)
+        #         shift_logits = shift_logits[shift_attention_mask != 0].contiguous()
+        #         shift_labels = shift_labels[shift_attention_mask != 0].contiguous()
+
+        #     import torch.nn.functional as F
+
+        #     vocab_size = self.text_config.vocab_size
+
+        #     flat_logits = shift_logits.view(-1, vocab_size)          # [N, V]
+        #     flat_labels = shift_labels.view(-1).to(flat_logits.device)  # [N]
+
+        #     log_probs = F.log_softmax(flat_logits, dim=-1)           # [N, V]
+
+        #     target_probs = F.one_hot(flat_labels, num_classes=vocab_size).float()  # [N, V]
+
+        #     # optional label smoothing
+        #     eps = 0.1
+        #     target_probs = (1.0 - eps) * target_probs + eps / vocab_size
+
+        #     loss = F.kl_div(
+        #         log_probs,
+        #         target_probs,
+        #         reduction="batchmean",
+        #     )
+
+        # if not return_dict:
+        #     output = (logits,) + outputs[1:]
+        #     return (loss,) + output if loss is not None else output
+
+        # return Gemma3CausalLMOutputWithPast(
+        #     loss=loss,
+        #     logits=logits,
+        #     past_key_values=outputs.past_key_values,
+        #     hidden_states=outputs.hidden_states,
+        #     attentions=outputs.attentions,
+        # )

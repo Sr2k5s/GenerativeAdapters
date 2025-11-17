@@ -310,6 +310,78 @@ class CommonGenTaskDataset(AbstractTaskDataset):
         
         return self.seq2seq_format(src_texts, tgt_texts, add_prefix)
 
+
+# This instruction template can stay at the module level
+ML_SUM_INSTRUCTION = (
+    "You are a text summarizer. Generate a short summary for the article, in the SAME language as the article.\n"
+    "Provide your final answer in a JSON block, marked with 'Final JSON:'.\n\n"
+    "Article:\n"
+    "{data}\n\n"
+    "Final JSON:\n"
+    '{{"sentence": "<your summary sentence here>"}}\n'
+)
+
+class WikiLinguaTaskDataset(AbstractTaskDataset):
+    """
+    Task processor for the GEM/wiki_lingua dataset.
+    All preprocessing logic is contained within this class.
+    
+    This task uses the 'wiki_lingua_en' config from the 'gem' dataset.
+    """
+    name = "wiki_lingua" # A friendly name for your task mapping
+    task_specific_config = {'max_length': 256, 'num_beams': 4}
+    metrics = [metrics.rouge] # Standard for summarization
+
+    def load_dataset(self, split: int):
+        """
+        Loads the 'wiki_lingua_en' configuration from the 'gem' dataset.
+        """
+        return datasets.load_dataset(
+            "GEM/wiki_lingua", # This is the specific config for GEM/wiki_lingua
+            split=split, 
+            trust_remote_code=True
+        )
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Applies the summarization instructional prompt and processes the target text.
+        'add_prefix' is ignored as we use a full, custom prompt.
+        """
+        
+        # --- 1. Source Text Logic (from preprocess_wiki_lingua) ---
+        # The 'gem/wiki_lingua_en' dataset has a 'source' field.
+        data_block = example.get("source", "")
+        src_text = ML_SUM_INSTRUCTION.format(data=data_block)
+        
+        # --- 2. Target Text Logic (from _get_target_text) ---
+        # The 'gem/wiki_lingua_en' dataset has a 'target' field.
+        tgt = example.get("target", None) 
+        
+        if tgt is None:
+            tgt = example.get("text", None)
+        if tgt is None:
+            refs = example.get("references", None)
+            if isinstance(refs, list) and refs:
+                tgt = refs[0] # Use the first reference
+        if tgt is None:
+            tgt = "" # Default to empty string
+        
+        # Handle cases where the target might be a list (though not for this dataset)
+        if isinstance(tgt, list) and tgt:
+            tgt_text = str(tgt[0])
+        else:
+            tgt_text = str(tgt)
+
+        # --- 3. Return the final format ---
+        # Note: This trains the model to output the raw summary,
+        # not the JSON block mentioned in the prompt.
+        return {
+            "src_texts": src_text,
+            "tgt_texts": tgt_text,
+            "task": self.name
+        }
+
+
 class XSumTaskDataset(AbstractTaskDataset):
     """Task processor for the XSum summarization dataset."""
     name = "xsum"
@@ -335,7 +407,7 @@ class XSumTaskDataset(AbstractTaskDataset):
 class WebNLGTaskDataset(AbstractTaskDataset):
     """Task processor for the WebNLG (data-to-text) dataset."""
     name = "web_nlg"
-    task_specific_config = {'max_length': 256, 'num_beams': 4}
+    task_specific_config = {'max_length': 256, 'num_beams': 1}
     metrics = [metrics.bleu]
 
     def load_dataset(self, split: int):
@@ -379,7 +451,7 @@ TASKS = OrderedDict([
     ('xsum', XSumTaskDataset),
     ('e2e_nlg', E2ENLGTaskDataset),
     ('web_nlg', WebNLGTaskDataset),
-    
+    ('wiki_lingua', WikiLinguaTaskDataset)
     # You can add more tasks here by creating a new class
     # for each one and implementing its 'preprocessor'.
     # ('mlsum_de', MLSumDETaskDataset),
