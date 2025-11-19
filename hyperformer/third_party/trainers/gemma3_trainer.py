@@ -85,6 +85,9 @@ if False:
 logger = logging.get_logger(__name__)
 
 
+
+
+
 class GemmaAdapterKDTrainer(Trainer):
     """
     Trainer for Knowledge Distillation with Gemma 3 AND Hyperformer Adapters.
@@ -128,11 +131,16 @@ class GemmaAdapterKDTrainer(Trainer):
         self.alpha_kd = alpha_kd
         self.temperature = temperature
 
+        self.set_model = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
+
         # Ensure teacher model is on the same device and in eval mode
         if self.teacher_model is not None:
-            self.teacher_model = self.teacher_model.to(self.args.device)
+            self.teacher_model = self.teacher_model.to(self.set_model)
             self.teacher_model.eval()
 
+        device = next(self.teacher_model.parameters()).device
+        print(f"======================================================Teacher Model is on: {device}========================================")
+        
         # Handle loss padding for CausalLM
         self.pad_token_id = self.model.config.pad_token_id
         if self.pad_token_id is None:
@@ -146,9 +154,16 @@ class GemmaAdapterKDTrainer(Trainer):
         # KL Divergence loss for the "soft" teacher logits
         self.loss_fn_kl = torch.nn.KLDivLoss(reduction='batchmean', log_target=True)
 
-    
+    def _prepare_inputs(self, inputs: Dict[str, Union[torch.Tensor, Any]]) -> Dict[str, Union[torch.Tensor, Any]]:
+        
+        for k, v in inputs.items():
+            # Check if the value is a PyTorch tensor (and not the 'task' list/string)
+            if isinstance(v, torch.Tensor):
+                inputs[k] = v.to(self.set_model)
+                    
+        return inputs
     # --- [Point 1 & 6: Compute Loss] ---
-    # This is the new KD-aware loss function.
+    # This is the new KD-aware loss function
     # It assumes `inputs` contains `labels` (with -100) and
     # any adapter-specific keys (like `task`) from the dataloader.
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -160,6 +175,19 @@ class GemmaAdapterKDTrainer(Trainer):
         This function is called by `training_step` (with adapters)
         and `prediction_step` (with adapters).
         """
+        
+        device = next(self.model.parameters()).device
+        print(f"======================================================Model Inside Compute Loss: {device}========================================")
+
+        device = next(self.teacher_model.parameters()).device
+        print(f"======================================================Model Inside Compute Loss: {device}========================================")
+
+        if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
+            print(f"✅ Input IDs device is now: {inputs['input_ids'].device}")
+    
+        if "labels" in inputs and isinstance(inputs["labels"], torch.Tensor):
+            print(f"✅ Labels device is now: {inputs['labels'].device}")
+        
         
         # We need the labels for both loss calculations.
         labels = inputs.get("labels")
@@ -228,7 +256,7 @@ class GemmaAdapterKDTrainer(Trainer):
 
         return (loss, student_outputs) if return_outputs else loss
 
-    def evaluate(self, eval_datasets: Optional[Dict[str, Dataset]] = None) -> Dict[str, float]:
+    def evaluate(self, eval_datasets: Optional[Dataset] = None, ignore_keys: Optional[List[str]] = None) -> Dict[str, float]:
         """
         Run evaluation and returns metrics.
         (Copied from T5Trainer)
@@ -313,10 +341,13 @@ class GemmaAdapterKDTrainer(Trainer):
             # Seed must be set before instantiating the model when using model_init.
             set_seed(self.args.seed)
             model = self.call_model_init(trial)
-            self.model = model.to(self.args.device)
+            self.model = model.to(self.set_model)
             # Reinitializes optimizer and scheduler
             self.optimizer, self.lr_scheduler = None, None
 
+        device = next(self.model.parameters()).device
+        print(f"======================================================Student Model is on: {device}========================================")
+        
         # Keeping track whether we can can len() on the dataset or not
         train_dataset_is_sized = isinstance(self.train_dataset, collections.abc.Sized)
 
@@ -348,7 +379,8 @@ class GemmaAdapterKDTrainer(Trainer):
         self._load_optimizer_and_scheduler(model_path)
 
         # Mixed precision training with apex (torch < 1.6)
-        model = self.model
+        model = self.model.to(self.set_model)
+        print(f"======================================================Student Model Copy is on: {next(model.parameters()).device}========================================")
         if self.args.fp16 and _use_apex:
             if not is_apex_available():
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
@@ -357,7 +389,7 @@ class GemmaAdapterKDTrainer(Trainer):
         # Multi-gpu training (should be after apex fp16 initialization)
         if self.args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
-
+        print(f"======================================================Student Model 1 is on: {next(model.parameters()).device}========================================")   
         # Distributed training (should be after apex fp16 initialization)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             model = torch.nn.parallel.DistributedDataParallel(
@@ -370,7 +402,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     else True
                 ),
             )
-
+        print(f"======================================================Student Model 2 is on: {next(model.parameters()).device}========================================")
         # Train!
         if False:
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
@@ -402,6 +434,11 @@ class GemmaAdapterKDTrainer(Trainer):
         epochs_trained = 0
         steps_trained_in_current_epoch = 0
 
+
+
+        print(f"======================================================Student Model 3 is on: {next(model.parameters()).device}========================================")
+
+        
         # Check if continuing training from a checkpoint
         if model_path and os.path.isfile(os.path.join(model_path, "trainer_state.json")):
             self.state = TrainerState.load_from_json(os.path.join(model_path, "trainer_state.json"))
@@ -411,6 +448,10 @@ class GemmaAdapterKDTrainer(Trainer):
             logger.info("  Continuing training from epoch %d", epochs_trained)
             logger.info("  Continuing training from global step %d", self.state.global_step)
             logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+
+
+
+        print(f"======================================================Student Model 4 is on: {next(model.parameters()).device}========================================")
 
         # Update the references
         self.callback_handler.model = self.model
@@ -424,7 +465,7 @@ class GemmaAdapterKDTrainer(Trainer):
         self.state.is_local_process_zero = self.is_local_process_zero()
         self.state.is_world_process_zero = self.is_world_process_zero()
 
-        tr_loss = torch.tensor(0.0).to(self.args.device)
+        tr_loss = torch.tensor(0.0).to(self.set_model)
         self._logging_loss_scalar = 0
         self._total_loss_scalar = 0.0
         self._globalstep_last_logged = 0
@@ -432,7 +473,7 @@ class GemmaAdapterKDTrainer(Trainer):
         model.zero_grad()
 
         self.control = self.callback_handler.on_train_begin(self.args, self.state, self.control)
-
+        print(f"======================================================Student Model 5 is on: {next(model.parameters()).device}========================================")
         for epoch in range(epochs_trained, num_train_epochs):
             
             # --- CRITICAL MULTI-TASK LOGIC ---
@@ -448,8 +489,8 @@ class GemmaAdapterKDTrainer(Trainer):
             # ---
 
             if False:
-                parallel_loader = pl.ParallelLoader(train_dataloader, [self.args.device]).per_device_loader(
-                    self.args.device
+                parallel_loader = pl.ParallelLoader(train_dataloader, [self.set_model]).per_device_loader(
+                    self.set_model
                 )
                 epoch_iterator = parallel_loader
             else:
@@ -462,10 +503,25 @@ class GemmaAdapterKDTrainer(Trainer):
             steps_in_epoch = len(epoch_iterator) if train_dataset_is_sized else self.args.max_steps
             self.control = self.callback_handler.on_epoch_begin(self.args, self.state, self.control)
 
+
+
+            print(f"======================================================Student Model 5 is on: {next(model.parameters()).device}========================================")
+            
+
             for step, inputs in enumerate(epoch_iterator):
                 #heyya
                 grad_norm_for_log = None
+                inputs = self._prepare_inputs(inputs)
 
+
+                if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
+                    print(f"✅ Input IDs device is now: {inputs['input_ids'].device}")
+    
+                if "labels" in inputs and isinstance(inputs["labels"], torch.Tensor):
+                    print(f"✅ Labels device is now: {inputs['labels'].device}")
+
+                print(f"======================================================Student Model 6 is on: {next(model.parameters()).device}========================================")
+                
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -479,11 +535,13 @@ class GemmaAdapterKDTrainer(Trainer):
                     and self.args.local_rank != -1
                     and _use_ddp_no_sync
                 ):
+                    print(f"======================================================Student Model before train is on: {next(model.parameters()).device}========================================")
                     with model.no_sync():
                         tr_loss += self.training_step(model, inputs)
                 else:
                     # training_step calls compute_loss, which is our
                     # new overridden KD loss function.
+                    print(f"======================================================Student Model before train is on: {next(model.parameters()).device}========================================")                    
                     tr_loss += self.training_step(model, inputs)
                 self._total_flos += self.floating_point_ops(inputs)
 
@@ -514,7 +572,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
                     print("I am here")
-                    if step % 10 == 0:
+                    if step % 100 == 0:
                         try:
                             tokenizer = self.tokenizer
 
@@ -532,8 +590,8 @@ class GemmaAdapterKDTrainer(Trainer):
                             # --------------------------
                             with torch.no_grad():
                                 outputs = model(
-                                    input_ids=input_ids.to(self.args.device),
-                                    attention_mask=inputs["attention_mask"].to(self.args.device),
+                                    input_ids=input_ids.to(self.set_model),
+                                    attention_mask=inputs["attention_mask"].to(self.set_model),
                                     task=inputs["task"] if "task" in inputs else None
                                 )
                                 logits = outputs.logits
@@ -619,7 +677,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     self.state.best_model_checkpoint, 
                     adapter_config=self.adapter_config
                 )
-                self.model = self.model.to(self.args.device)
+                self.model = self.model.to(self.set_model)
             else:
                 # Fallback for non-PreTrainedModel
                 state_dict = torch.load(os.path.join(self.state.best_model_checkpoint, "pytorch_model.bin"))
@@ -649,7 +707,15 @@ class GemmaAdapterKDTrainer(Trainer):
     ) -> Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
 
         inputs = self._prepare_inputs(inputs)
-
+        device = next(model.parameters()).device
+        print(f"======================================================Model Inside Compute Loss: {device}========================================")
+        if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
+            print(f"✅ Input IDs device is now: {inputs['input_ids'].device}")
+    
+        if "labels" in inputs and isinstance(inputs["labels"], torch.Tensor):
+            print(f"✅ Labels device is now: {inputs['labels'].device}")
+        
+        model = model.to (self.set_model)
         # Generation kwargs
         gen_kwargs = {
             "max_new_tokens": self.model.config.max_length,  # FIXED
@@ -820,4 +886,3 @@ class GemmaAdapterKDTrainer(Trainer):
         )
         padded_tensor[:, : tensor.shape[-1]] = tensor
         return padded_tensor
-    

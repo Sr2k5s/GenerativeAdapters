@@ -12,6 +12,7 @@ from transformers.optimization import (
     get_linear_schedule_with_warmup,
     get_polynomial_decay_schedule_with_warmup,
 )
+import torch
 from typing import Optional, List
 
 arg_to_scheduler = {
@@ -48,6 +49,8 @@ class Seq2SeqTrainingArguments(TrainingArguments):
     attention_dropout: Optional[float] = field(
         default=None, metadata={"help": "Attention dropout probability. Goes into model.config."}
     )
+    # device = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
+
     lr_scheduler: Optional[str] = field(
         default="linear",
         metadata={"help": f"Which lr scheduler to use. Selected in {sorted(arg_to_scheduler.keys())}"},

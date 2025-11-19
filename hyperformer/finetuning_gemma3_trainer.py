@@ -145,7 +145,9 @@ def main():
                 setattr(adapter_config, p, getattr(adapter_args, p))
             else:
                 logger.warning(f"({adapter_config.__class__.__name__}) doesn't have a `{p}` attribute")
-        adapter_config.device = training_args.device
+        device = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
+
+        adapter_config.device = device
     else:
         adapter_config = None
     print(model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path)

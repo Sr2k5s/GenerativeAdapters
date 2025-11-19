@@ -11,7 +11,7 @@
   "val_max_target_length": 128,
   "test_max_target_length": 128,
   "num_train_epochs": 100,
-  "warmup_steps": 500,
+  "warmup_steps": 50,
   "eval_steps": 2000,
   "overwrite_output_dir": true,
   "per_device_train_batch_size": 8,
@@ -34,14 +34,10 @@
   "greater_is_better": true,
   "max_steps": 65536,
   "tasks": [
-    "dart",
-    "e2e_nlg",
-    "wiki_lingua"
+    "dart"
   ],
   "eval_tasks": [
-    "dart",
-    "e2e_nlg",
-    "wiki_lingua"
+    "dart"
   ],
   "train_adapters": true,
   "adapter_config_name": "meta-adapter",
@@ -54,5 +50,5 @@
   "freeze_model": false,
   "unfreeze_layer_norms": true,
   "unfreeze_lm_head": false,
-  "use_cpu":"true"  
+  "use_cpu":"false"  
 }
