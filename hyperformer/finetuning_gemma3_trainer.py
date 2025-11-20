@@ -146,7 +146,7 @@ def main():
             else:
                 logger.warning(f"({adapter_config.__class__.__name__}) doesn't have a `{p}` attribute")
         device = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
-
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         adapter_config.device = device
     else:
         adapter_config = None

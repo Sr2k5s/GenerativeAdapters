@@ -132,7 +132,7 @@ class GemmaAdapterKDTrainer(Trainer):
         self.temperature = temperature
 
         self.set_model = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
-
+        # self.set_model = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Ensure teacher model is on the same device and in eval mode
         if self.teacher_model is not None:
             self.teacher_model = self.teacher_model.to(self.set_model)
@@ -534,6 +534,7 @@ class GemmaAdapterKDTrainer(Trainer):
                     ((step + 1) % self.args.gradient_accumulation_steps != 0)
                     and self.args.local_rank != -1
                     and _use_ddp_no_sync
+                    and hasattr(model, "no_sync")
                 ):
                     print(f"======================================================Student Model before train is on: {next(model.parameters()).device}========================================")
                     with model.no_sync():
