@@ -81,7 +81,7 @@ class TaskEmbeddingController(nn.Module):
     def set_task_embeddings(self, tasks):
         self.task_to_embeddings = nn.ParameterDict(dict())
         for task in tasks:
-            task_embedding = torch.Tensor(torch.randn(self.task_embedding_dim)).to(self.device)
+            task_embedding = torch.Tensor(torch.randn(self.task_embedding_dim)).to(self.device) * 0.0001
             self.task_to_embeddings[task] = nn.Parameter(task_embedding)
 
     def forward(self, task):

@@ -168,6 +168,15 @@ E2E_NLG_INSTRUCTION = (
     '{{"sentence": "<your sentence here>"}}\n'
 )
 
+SQUAD_QG_INSTRUCTION = (
+    "You are a helpful question generation assistant. "
+    "Given the following context and an answer found within it, "
+    "generate a natural language question that corresponds to that answer.\n\n"
+    "Context:\n{context}\n\n"
+    "Answer:\n{answer}"
+)
+
+
 
 def _linearize_triple(triple: List[str]) -> str:
     """Converts a DART triple (list of 3 strings) into a single string."""
@@ -180,7 +189,67 @@ def _linearize_triple(triple: List[str]) -> str:
 
 # --- GEM Task Definitions ---
 
+class SquadV2TaskDataset(AbstractTaskDataset):
+    """Task processor for the GEM SQuAD v2 (Question Generation) dataset."""
+    name = "squad_v2"
+    
+    # SQuAD outputs (questions) are usually short, inputs (context) are long.
+    task_specific_config = {'max_length': 64, 'num_beams': 4}
+    metrics = [metrics.bleu, metrics.rouge] 
 
+    def load_dataset(self, split: int):
+        # Loading the specific GEM version of SQuAD v2
+        return datasets.load_dataset("GEM/squad_v2", split=split, trust_remote_code=True)
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Build src_texts using the context and the answer;
+        target is the question.
+        """
+        # 1. Extract Context
+        context = example.get("context", "").strip()
+
+        # 2. Extract Answer
+        # The 'answers' field is a dictionary containing a list of text strings:
+        # e.g., {'text': ['the Republic of Guinea-Bissau'], 'answer_start': [59]}
+        # We generally use the first answer as the conditioning signal.
+        answers_map = example.get("answers", {})
+        answer_text = ""
+        
+        if answers_map and "text" in answers_map and len(answers_map["text"]) > 0:
+            answer_text = answers_map["text"][0]
+        else:
+            # Fallback if answer text is missing (rare in SQuAD)
+            logging.warning(f"No answer text found for SQuAD example: {example.get('gem_id', 'unknown')}")
+
+        # 3. Apply the instructional prompt
+        src_text = SQUAD_QG_INSTRUCTION.format(
+            context=context, 
+            answer=answer_text
+        )
+
+        # 4. Extract Target (The Question)
+        # In the sample provided, 'target' contains the question.
+        tgt = example.get("target", None)
+        
+        # Fallbacks if 'target' is missing
+        if tgt is None:
+            tgt = example.get("question", None)
+        if tgt is None:
+            refs = example.get("references", [])
+            if isinstance(refs, list) and len(refs) > 0:
+                tgt = refs[0]
+        
+        if tgt is None:
+            tgt = ""
+            logging.warning(f"No target (question) found for SQuAD example: {example.get('gem_id', 'unknown')}")
+
+        # Return formatted dict
+        return {
+            "src_texts": str(src_text),
+            "tgt_texts": str(tgt),
+            "task": self.name
+        }
 
 class E2ENLGTaskDataset(AbstractTaskDataset):
     """
@@ -190,7 +259,7 @@ class E2ENLGTaskDataset(AbstractTaskDataset):
     name = "e2e_nlg"
     # E2E outputs are relatively short sentences
     task_specific_config = {'max_length': 128, 'num_beams': 1}
-    metrics = [metrics.bleu] # Example metric
+    metrics = [metrics.bleu, metrics.rouge] # Example metric
 
     def load_dataset(self, split: int):
         """Loads the standalone e2e_nlg dataset."""
@@ -451,7 +520,8 @@ TASKS = OrderedDict([
     ('xsum', XSumTaskDataset),
     ('e2e_nlg', E2ENLGTaskDataset),
     ('web_nlg', WebNLGTaskDataset),
-    ('wiki_lingua', WikiLinguaTaskDataset)
+    ('wiki_lingua', WikiLinguaTaskDataset),
+    ('squad_v2', SquadV2TaskDataset),
     # You can add more tasks here by creating a new class
     # for each one and implementing its 'preprocessor'.
     # ('mlsum_de', MLSumDETaskDataset),

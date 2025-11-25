@@ -38,6 +38,21 @@ class Seq2SeqTrainingArguments(TrainingArguments):
     predict_with_generate: bool = field(
         default=False, metadata={"help": "Whether to use generate to calculate generative metrics (ROUGE, BLEU)."}
     )
+
+    generation_max_length: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Maximum number of tokens to generate in evaluation / prediction. "
+                    "If None, the trainer may use task-specific defaults."
+        },
+    )
+    generation_num_beams: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "Number of beams to use for beam search generation during evaluation."
+        },
+    )
+    
     adafactor: bool = field(default=False, metadata={"help": "whether to use adafactor"})
     encoder_layerdrop: Optional[float] = field(
         default=None, metadata={"help": "Encoder layer dropout probability. Goes into model.config."}
@@ -168,9 +183,9 @@ class DataTrainingArguments:
                     "than this will be truncated, sequences shorter will be padded."
         },
     )
-    n_train: Optional[int] = field(default=16, metadata={"help": "# training examples. -1 means use all."})
-    n_val: Optional[int] = field(default=8, metadata={"help": "# validation examples. -1 means use all."})
-    n_test: Optional[int] = field(default=8, metadata={"help": "# test examples. -1 means use all."})
+    n_train: Optional[int] = field(default=20000, metadata={"help": "# training examples. -1 means use all."})
+    n_val: Optional[int] = field(default=1400, metadata={"help": "# validation examples. -1 means use all."})
+    n_test: Optional[int] = field(default=1400, metadata={"help": "# test examples. -1 means use all."})
     eval_beams: Optional[int] = field(default=1, metadata={"help": "# num_beams to use for evaluation."})
     ignore_pad_token_for_loss: bool = field(
         default=True,

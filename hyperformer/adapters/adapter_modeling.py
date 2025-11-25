@@ -40,9 +40,9 @@ class AdapterHyperNet(nn.Module):
             config.train_task_embeddings else config.task_embedding_dim
         # Considers weight and bias parameters for generating adapter weights.
         self.weight_generator = nn.Sequential(
-            linear_layer(self.task_embedding_dim, self.input_dim * self.output_dim))
+            linear_layer(self.task_embedding_dim, self.input_dim * self.output_dim, std=1e-6))
         self.bias_generator = nn.Sequential(
-            linear_layer(self.task_embedding_dim, self.input_dim))
+            linear_layer(self.task_embedding_dim, self.input_dim, std=1e-6))
 
     def forward(self, task_embedding):
         task_embedding = task_embedding.view(-1)
@@ -60,9 +60,9 @@ class AdapterLayersHyperNet(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.weight_generator = nn.Sequential(
-            linear_layer(config.projected_task_embedding_dim, self.input_dim * self.output_dim))
+            linear_layer(config.projected_task_embedding_dim, self.input_dim * self.output_dim, std=1e-6))
         self.bias_generator = nn.Sequential(
-            linear_layer(config.projected_task_embedding_dim, self.input_dim))
+            linear_layer(config.projected_task_embedding_dim, self.input_dim, std=1e-6))
 
     def forward(self, embeddings):
         weight = self.weight_generator(embeddings).view(self.input_dim, self.output_dim)

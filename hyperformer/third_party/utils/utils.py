@@ -829,3 +829,103 @@ class TaskCollator_gemma:
 
             "task": task_name,
         }
+
+
+# class TaskCollator_gemma:
+#     """
+#     Collator for decoder-only Gemma models using:
+#     TRAIN mode:
+#         input_ids  = prompt + target
+#         labels     = -100 * len(prompt) + target
+#     EVAL mode:
+#         input_ids_eval       = prompt only
+#         labels_eval          = target only (for metrics/debug)
+#         attention_mask_eval  = mask for input_ids_eval
+#     """
+
+#     def __init__(self, tokenizer, data_args, tpu_num_cores=None):
+#         self.tokenizer = tokenizer
+#         self.pad_token_id = tokenizer.pad_token_id
+#         self.eos_token_id = tokenizer.eos_token_id
+#         self.ignore_index = -100
+
+#         self.max_source_length = data_args.max_source_length
+#         self.max_target_length = data_args.max_target_length
+
+#     def __call__(self, batch):
+#         prompts  = [b["src_texts"] for b in batch]
+#         targets  = [b["tgt_texts"] for b in batch]
+#         tasks    = [b["task"] for b in batch]
+
+#         assert len(set(tasks)) == 1, "Each batch must contain a single task."
+#         task_name = tasks[0]
+
+#         prompt_enc = self.tokenizer(
+#             prompts,
+#             max_length=self.max_source_length,
+#             truncation=True,
+#             padding=False,
+#         )
+#         target_enc = self.tokenizer(
+#             targets,
+#             max_length=self.max_target_length,
+#             truncation=True,
+#             padding=False,
+#         )
+
+#         batch_inp, batch_att, batch_lbl = [], [], []
+#         batch_inp_eval, batch_att_eval, batch_lbl_eval = [], [], []
+
+#         for p_ids, t_ids in zip(prompt_enc["input_ids"], target_enc["input_ids"]):
+
+#             # ===== TRAIN MODE =====
+#             t_ids_eos = t_ids + [self.eos_token_id]
+
+#             train_input = p_ids + t_ids_eos
+#             train_mask  = [1] * len(train_input)
+#             train_labels = ([self.ignore_index] * len(p_ids)) + t_ids_eos
+
+#             batch_inp.append(torch.tensor(train_input))
+#             batch_att.append(torch.tensor(train_mask))
+#             batch_lbl.append(torch.tensor(train_labels))
+
+#             # ===== EVAL MODE =====
+#             # CHANGED: eval input = prompt only (NO eos)
+#             eval_input = p_ids
+#             eval_mask  = [1] * len(eval_input)
+
+#             # CHANGED: eval labels = target only (with eos)
+#             eval_labels = t_ids_eos
+
+#             batch_inp_eval.append(torch.tensor(eval_input))
+#             batch_att_eval.append(torch.tensor(eval_mask))
+#             batch_lbl_eval.append(torch.tensor(eval_labels))
+
+#         def left_pad(seqs, pad_value):
+#             max_len = max([s.size(0) for s in seqs])
+#             padded = []
+#             for s in seqs:
+#                 pad_len = max_len - s.size(0)
+#                 pad = torch.full((pad_len,), pad_value, dtype=s.dtype)
+#                 padded.append(torch.cat([pad, s]))
+#             return torch.stack(padded)
+
+#         input_ids = left_pad(batch_inp, self.pad_token_id)
+#         attention_mask = left_pad(batch_att, 0)
+#         labels = left_pad(batch_lbl, self.ignore_index)
+
+#         input_ids_eval = left_pad(batch_inp_eval, self.pad_token_id)
+#         attention_mask_eval = left_pad(batch_att_eval, 0)
+#         labels_eval = left_pad(batch_lbl_eval, self.ignore_index)
+
+#         return {
+#             "input_ids": input_ids,
+#             "attention_mask": attention_mask,
+#             "labels": labels,
+
+#             "input_ids_eval": input_ids_eval,
+#             "attention_mask_eval": attention_mask_eval,
+#             "labels_eval": labels_eval,
+
+#             "task": task_name,
+#         }

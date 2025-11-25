@@ -145,8 +145,8 @@ def main():
                 setattr(adapter_config, p, getattr(adapter_args, p))
             else:
                 logger.warning(f"({adapter_config.__class__.__name__}) doesn't have a `{p}` attribute")
-        device = torch.device("mps" if torch.backends.mps.is_available() and torch.backends.mps.is_built() else "cpu")
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         adapter_config.device = device
     else:
         adapter_config = None
@@ -304,7 +304,7 @@ def main():
             model_path=model_path \
                 if (os.path.exists(training_args.output_dir) and not training_args.optimize_from_scratch) else None,
         )
-        print("hello 1")
+        # print("hello 1")
         if training_args.compute_time: 
             torch.cuda.synchronize()
             end.record()

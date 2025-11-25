@@ -123,9 +123,11 @@ class Gemma2FFWrapper(nn.Module):
         norm_x = self.layer_norm(hidden_states)
         y = self.mlp_original_gemma(norm_x)
         if self.train_adapters and self.train_adapters_blocks:
-            y = self.adapter_controller(task if not self.is_meta_adapter else task_embedding, y)
+            adapter_output = self.adapter_controller(task if not self.is_meta_adapter else task_embedding, y)
+            y = y + adapter_output
         elif self.train_adapters and self.unique_hyper_net:
-            y = self.layer_hyper_net(y, gemma_adapters.feed_forward)
+            adapter_output = self.layer_hyper_net(y, gemma_adapters.feed_forward)
+            y = y + adapter_output
         layer_output = hidden_states + self.dropout(y)
         return layer_output
 
@@ -233,6 +235,7 @@ class Gemma2AttentionWrapper(nn.Module):
                                   getattr(config, "dropout_rate", 0.0)))
 
 
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -268,14 +271,19 @@ class Gemma2AttentionWrapper(nn.Module):
         else:
             attn_out, attn_weights = attn_res, None
 
-        y = attn_out
+        y = attn_out 
+        
         if self.train_adapters:
             if self.train_adapters_blocks:
-                y = self.adapter_controller(task if not getattr(self, "is_meta_adapter", False) else task_embedding, y)
+                adapter_output = self.adapter_controller(task if not getattr(self, "is_meta_adapter", False) else task_embedding, y)
+                y = y + adapter_output
+
             elif self.unique_hyper_net and gemma_adapters is not None:
                 sa = getattr(gemma_adapters, "self_attention", None)
                 if sa is not None:
-                    y = self.layer_hyper_net(y, sa)
+                    adapter_output = self.layer_hyper_net(y, sa)
+                    y = y + adapter_output
+        # --- FIX ENDS HERE ---
 
         layer_output = hidden_states + self.dropout(y)
         return (layer_output, attn_weights) if output_attentions else (layer_output,)
