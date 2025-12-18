@@ -1,0 +1,14 @@
+# --- Previous Exclusions ---
+.env
+__pycache__/
+*.pyc
+myvenv/
+.vscode/
+.DS_Store
+
+# --- T5 Specific Exclusions ---
+finetune_t5_trainer.py
+*t5_trainer.py
+*modeling_t5.py
+*configuration_t5.py
+*gemma3_trainer_print.py

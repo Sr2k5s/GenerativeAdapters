@@ -1,0 +1,613 @@
+"""
+Implements different GEM tasks and defines the processors to convert each dataset
+to a sequence-to-sequence format for multi-task training.
+
+This structure is based on the GLUE task processor and adapted for the
+GEM (Generation, Evaluation, and Metrics) benchmark.
+"""
+
+from collections import OrderedDict
+import abc
+import datasets
+import functools
+import logging
+import numpy as np
+import torch
+from typing import Callable, Dict, Mapping, List
+
+# --- Metrics Stub ---
+# You will need to replace this with your actual metrics module/functions
+# (e.g., from `datasets.load_metric` or your own implementation)
+from metrics import metrics
+
+logger = logging.getLogger(__name__)
+
+
+# --- Helper Function Stubs ---
+# This helper was used in the GLUE code for classification tasks.
+def compute_task_max_decoding_length(label_list: List[str]) -> int:
+    """Computes max decoding length for classification tasks."""
+    # Simple heuristic: max length of label strings + a small buffer
+    if not label_list:
+        return 2
+    return max(len(label) for label in label_list) + 2
+# -----------------------------
+
+
+class AbstractTaskDataset(abc.ABC):
+    """
+    Defines the abstract class for all the tasks.
+    (This is the same base class you provided)
+    """
+    name = NotImplemented
+    task_specific_config: Dict = NotImplemented
+    preprocessor: Callable = NotImplemented
+    metrics: List[Callable] = NotImplemented
+    split_to_data_split: Mapping[str, str] = \
+        {"train": "train", "validation": "validation", "test": "test"}
+
+    # These lists are from the GLUE/SuperGLUE setup and may not be
+    # relevant for GEM, but are kept for compatibility with the base class.
+    small_datasets_without_all_splits = ["cola", "wnli", "rte", "trec", "superglue-cb", "sick",
+                                         "mrpc", "stsb", "imdb", "commonsense_qa", "superglue-boolq"]
+    large_data_without_all_splits = ["yelp_polarity", "qqp", "qnli",
+                                     "social_i_qa", "cosmos_qa", "winogrande", "hellaswag", "sst2"]
+
+    def __init__(self, seed=42):
+        self.seed = seed
+
+    def get_sampled_split(self, split: int, n_obs: int = None):
+        split = self.split_to_data_split[split]
+        dataset = self.load_dataset(split)
+        total_size = len(dataset)
+        n_obs = self.check_n_obs(n_obs, total_size)
+        if n_obs is not None:
+            split = split + "[:{}]".format(n_obs)
+        return split
+
+    def get_shuffled_sampled_split(self, split: int, n_obs: int = None):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        mapped_split = self.split_to_data_split[split]
+        dataset = self.load_dataset(mapped_split)
+        train_size = len(dataset)
+        indices = torch.randperm(train_size, generator=generator).tolist()
+        dataset = self.select_dataset_samples(indices, dataset, n_obs=n_obs)
+        return dataset
+
+    def check_n_obs(self, n_obs, total_size):
+        if n_obs is not None and n_obs > total_size:
+            n_obs = total_size
+            logger.warning("n_obs is set to %s", n_obs)
+        return n_obs
+
+    def select_dataset_samples(self, indices, dataset, n_obs: int = None):
+        n_obs = self.check_n_obs(n_obs, len(indices))
+        indices = indices[:n_obs] if n_obs is not None else indices
+        return dataset.select(indices)
+
+    def load_dataset(self, split: int):
+        # Default loader. Can be overridden by subclasses if needed (e.g., for GEM configs).
+        # Most GEM tasks are configs of the 'gem' dataset.
+        # This default loader assumes the task name IS the dataset name (like DART).
+        return datasets.load_dataset(self.name, split=split, script_version="master")
+
+    def get_train_split_indices(self, split):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        mapped_split = self.split_to_data_split["train"]
+        dataset = self.load_dataset(mapped_split)
+        train_size = len(dataset)
+        indices = torch.randperm(train_size, generator=generator).tolist()
+        validation_size = 1000
+        if split == "validation":
+            return indices[:validation_size]
+        else:
+            return indices[validation_size:]
+
+    def get_half_validation_indices(self, split):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        mapped_split = self.split_to_data_split["validation"]
+        dataset = self.load_dataset(mapped_split)
+        validation_size = len(dataset)
+        indices = torch.randperm(validation_size, generator=generator).tolist()
+        if split == "validation":
+            return indices[:(validation_size // 2)]
+        else:
+            return indices[validation_size // 2:]
+
+    def get_dataset(self, split, n_obs=None, add_prefix=True, split_validation_test=False):
+        # (Logic from base class, handles train/val/test splitting for GLUE)
+        if split_validation_test and self.name in self.small_datasets_without_all_splits \
+                and split != "train":
+            mapped_split = self.split_to_data_split["validation"]
+            dataset = self.load_dataset(split=mapped_split)
+            indices = self.get_half_validation_indices(split)
+            dataset = self.select_dataset_samples(indices, dataset, n_obs)
+        elif split_validation_test and self.name in self.large_data_without_all_splits \
+                and split != "test":
+            dataset = self.load_dataset(split="train")
+            indices = self.get_train_split_indices(split)
+            dataset = self.select_dataset_samples(indices, dataset, n_obs)
+        else:
+            if n_obs == -1:
+                split = self.get_sampled_split(split, n_obs)
+                dataset = self.load_dataset(split=split)
+            else:
+                dataset = self.get_shuffled_sampled_split(split, n_obs)
+        
+        # Apply the task-specific preprocessor
+        return dataset.map(functools.partial(self.preprocessor, add_prefix=add_prefix), remove_columns=dataset.column_names, load_from_cache_file=False)
+
+    def seq2seq_format(self, src_strs: List[str], tgt_strs: List[str],
+                       add_prefix: bool = False, prefix: str = None):
+        src_prefix = self.name if prefix is None else prefix
+        src_strs = src_prefix + ": " + ' '.join(src_strs) if add_prefix else src_strs
+        return {"src_texts": src_strs,
+                "tgt_texts": ' '.join(tgt_strs),
+                "task": self.name}
+
+
+# --- DART Helpers (from your example) ---
+
+# --- DART (Triple-to-Text) ---
+# Fixed: Added "Description:" trigger and specific instruction to use it.
+INSTRUCTION_TEMPLATE = (
+    "You are a helpful data-to-text assistant. "
+    "Generate a coherent, natural-language sentence or paragraph that "
+    "correctly describes all the information in the following triples.\n"
+    "Provide your output immediately after the label 'Description:'.\n\n"
+    "Data Triples:\n"
+    "{triples}\n\n"
+    "Description:"
+)
+
+# --- E2E NLG (Data-to-Text JSON) ---
+# Note: This was already working well because it had the "Final JSON:" trigger.
+# Kept the structure but ensured robust spacing.
+E2E_NLG_INSTRUCTION = (
+    "You are a data-to-text assistant. Convert the following meaning representation into ONE fluent sentence.\n"
+    "Provide your final answer in a JSON block, marked with 'Final JSON:'.\n\n"
+    "Meaning Representation:\n"
+    "{data}\n\n"
+    "Final JSON:\n"
+    '{{"sentence": "<your sentence here>"}}\n'
+)
+
+# --- SQUAD (Question Generation) ---
+# Fixed: Added "Question:" trigger and instruction to prevent hallucinating context.
+SQUAD_QG_INSTRUCTION = (
+    "You are a helpful question generation assistant. "
+    "Given the following context and an answer found within it, "
+    "generate a natural language question that corresponds to that answer.\n"
+    "Write the final question immediately after the label 'Question:'.\n\n"
+    "Context:\n{context}\n\n"
+    "Answer:\n{answer}\n\n"
+    "Question:"
+)
+
+
+def _linearize_triple(triple: List[str]) -> str:
+    """Converts a DART triple (list of 3 strings) into a single string."""
+    if not isinstance(triple, list) or len(triple) != 3:
+        logging.warning(f"Malformed triple: {triple}. Skipping.")
+        return ""
+    # Ensure all parts are strings
+    s, p, o = str(triple[0]), str(triple[1]), str(triple[2])
+    return f"{s} | {p} | {o}"
+
+# --- GEM Task Definitions ---
+
+class SquadV2TaskDataset(AbstractTaskDataset):
+    """
+    Task processor that replicates GEM/squad_v2 structure but filters 
+    out unanswerable questions to ensure high-quality QG training.
+    """
+    name = "squad_v2"
+    
+    task_specific_config = {'max_length': 64, 'num_beams': 4}
+    metrics = [metrics.bleu, metrics.rouge] 
+
+    def load_dataset(self, split):
+        """
+        Loads standard SQuAD v2, filters it, and manually transforms it 
+        to match the GEM schema (adding gem_id, target, references).
+        """
+        # 1. Load Standard SQuAD (Safe from remote code execution errors)
+        # Note: 'split' should typically be "train" or "validation"
+        dataset = datasets.load_dataset("GEM/squad_v2", split=split)
+        
+        # 2. FILTER: Remove unanswerable questions
+        # We cannot generate a question if the answer text is empty.
+        print(f"[{split}] Original size: {len(dataset)}")
+        dataset = dataset.filter(lambda x: len(x["answers"]["text"]) > 0)
+        print(f"[{split}] Filtered size (Answerable only): {len(dataset)}")
+
+        # 3. TRANSFORM: Manually apply GEM Schema
+        # This recreates the fields your preprocessor expects ('target', 'gem_id')
+        def to_gem_format(example, idx):
+            return {
+                # Recreate the unique GEM ID string
+                "gem_id": f"gem-squad_v2-{split}-{idx}", 
+                # In GEM QG tasks, the 'target' is the Question
+                "target": example["question"],
+                # GEM includes a list of references
+                "references": [example["question"]] 
+            }
+
+        # Apply the transformation
+        dataset = dataset.map(to_gem_format, with_indices=True)
+        
+        return dataset
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Preprocessing logic (Unchanged from your logic, now safe to use GEM fields)
+        """
+        # 1. Extract Context
+        context = example.get("context", "").strip()
+
+        # 2. Extract Answer
+        # We can now be sure answers['text'] exists because of the filter above
+        answers_map = example.get("answers", {})
+        answer_text = answers_map["text"][0] if answers_map.get("text") else ""
+
+        # 3. Apply instruction
+        src_text = SQUAD_QG_INSTRUCTION.format(
+            context=context, 
+            answer=answer_text
+        )
+
+        # 4. Extract Target
+        # We can now confidently use the 'target' field we created in load_dataset
+        tgt = example.get("target", None)
+        
+        if tgt is None:
+            # Fallback (should not be reached with the new load_dataset logic)
+            tgt = example.get("question", "")
+            logging.warning(f"Target missing for {example.get('gem_id', 'unknown')}")
+
+        return {
+            "src_texts": str(src_text),
+            "tgt_texts": str(tgt),
+            "task": self.name
+        }
+        
+class E2ENLGTaskDataset(AbstractTaskDataset):
+    """
+    Task processor for the E2E_NLG dataset, using a specific
+    JSON-based instructional prompt for Gemma.
+    """
+    name = "e2e_nlg"
+    # E2E outputs are relatively short sentences
+    task_specific_config = {'max_length': 128, 'num_beams': 1}
+    metrics = [metrics.bleu, metrics.rouge] # Example metric
+
+    def load_dataset(self, split: int):
+        """Loads the standalone e2e_nlg dataset."""
+        return datasets.load_dataset(
+            "GEM/e2e_nlg", 
+            split=split, 
+            trust_remote_code=True
+        )
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Applies the JSON-based instructional prompt.
+        'add_prefix' is ignored as we use a full, custom prompt.
+        """
+        
+        data_block = example.get("meaning_representation", "")
+        src_text = E2E_NLG_INSTRUCTION.format(data=data_block)
+        
+        # --- 2. Target Text Logic (from _get_target_text) ---
+        # Get the target text from the correct field
+        tgt = example.get("human_reference", None) # 'e2e_nlg' specific field
+        
+        if tgt is None:
+            tgt = example.get("target", None)
+        if tgt is None:
+            tgt = example.get("text", None)
+        if tgt is None:
+            refs = example.get("references", None)
+            if isinstance(refs, list) and refs:
+                tgt = refs[0] # Use the first reference
+        if tgt is None:
+            tgt = "" # Default to empty string
+        
+        # Handle cases where the target might be a list
+        if isinstance(tgt, list) and tgt:
+            tgt_text = str(tgt[0])
+        else:
+            tgt_text = str(tgt)
+
+        # --- 3. Return the final format ---
+        # Note: This trains the model to output the raw sentence,
+        # not the JSON block mentioned in the prompt.
+        return {
+            "src_texts": src_text,
+            "tgt_texts": tgt_text,
+            "task": self.name
+        }
+
+class DARTTaskDataset(AbstractTaskDataset):
+    """Task processor for the DART (data-to-text) dataset."""
+    name = "dart"
+    # GEM tasks are generative, so we set a reasonable max output length
+    task_specific_config = {'max_length': 256, 'num_beams': 1}
+    metrics = [metrics.bleu, metrics.rouge] # Example metrics
+    
+    def load_dataset(self, split: int):
+        # DART is a standalone dataset on Hugging Face
+        return datasets.load_dataset("dart", split=split, trust_remote_code=True)
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Build src_texts from the tripleset using the Gemma instruction;
+        target from target / text / references.
+        (Adapted from your provided preprocessor function)
+        """
+        triples = example.get("tripleset", [])
+        triple_strings: List[str] = [_linearize_triple(t) for t in triples if t]
+
+        if triple_strings:
+            triples_block = "\n".join(f"- {ts}" for ts in triple_strings)
+        else:
+            triples_block = "- (none)"
+
+        # Apply the instructional prompt
+        src_text = INSTRUCTION_TEMPLATE.format(triples=triples_block)
+        
+        # Logic to find the target text
+        tgt = example.get("target", None)
+        if tgt is None:
+            tgt = " ".join(example.get('annotations', None).get('text',None))
+        if tgt is None:
+            refs = example.get("references", None)
+            if isinstance(refs, list) and refs:
+                tgt = refs[0] # Use the first reference
+        if tgt is None:
+            tgt = "" # Default to empty string if no target found
+            logging.warning(f"No target found for DART example: {example}")
+
+        # The base class's `seq2seq_format` expects lists of strings
+        # But our prompt is already a single formatted string.
+        # We also don't want to add the task-name prefix, as we have a full prompt.
+        
+        # Use custom formatting to override default prefixing
+        return {
+            "src_texts": str(src_text),
+            "tgt_texts": str(tgt),
+            "task": self.name
+        }
+
+class CommonGenTaskDataset(AbstractTaskDataset):
+    """Task processor for the Common Gen dataset."""
+    name = "common_gen"
+    task_specific_config = {'max_length': 128, 'num_beams': 1}
+    metrics = [metrics.bleu, metrics.rouge]
+
+    def load_dataset(self, split: int):
+        # Common Gen is also standalone
+        return datasets.load_dataset("common_gen", split=split, trust_remote_code=True)
+
+    def preprocessor(self, example, add_prefix=True):
+        # Input `example` has 'concepts' (list) and 'target' (string)
+        concepts = example.get("concepts", [])
+        target = example.get("target", "")
+
+        src_texts = ["generate a sentence with concepts:", ", ".join(concepts)]
+        tgt_texts = [target]
+        
+        return self.seq2seq_format(src_texts, tgt_texts, add_prefix)
+
+
+# This instruction template can stay at the module level
+ML_SUM_INSTRUCTION = (
+    "You are a text summarizer. Generate a short summary for the article, in the SAME language as the article.\n"
+    "Provide your final answer in a JSON block, marked with 'Final JSON:'.\n\n"
+    "Article:\n"
+    "{data}\n\n"
+    "Final JSON:\n"
+    '{{"sentence": "<your summary sentence here>"}}\n'
+)
+
+class WikiLinguaTaskDataset(AbstractTaskDataset):
+    """
+    Task processor for the GEM/wiki_lingua dataset.
+    All preprocessing logic is contained within this class.
+    
+    This task uses the 'wiki_lingua_en' config from the 'gem' dataset.
+    """
+    name = "wiki_lingua" # A friendly name for your task mapping
+    task_specific_config = {'max_length': 256, 'num_beams': 4}
+    metrics = [metrics.rouge] # Standard for summarization
+
+    def load_dataset(self, split: int):
+        """
+        Loads the 'wiki_lingua_en' configuration from the 'gem' dataset.
+        """
+        return datasets.load_dataset(
+            "GEM/wiki_lingua", # This is the specific config for GEM/wiki_lingua
+            split=split, 
+            trust_remote_code=True
+        )
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        Applies the summarization instructional prompt and processes the target text.
+        'add_prefix' is ignored as we use a full, custom prompt.
+        """
+        
+        # --- 1. Source Text Logic (from preprocess_wiki_lingua) ---
+        # The 'gem/wiki_lingua_en' dataset has a 'source' field.
+        data_block = example.get("source", "")
+        src_text = ML_SUM_INSTRUCTION.format(data=data_block)
+        
+        # --- 2. Target Text Logic (from _get_target_text) ---
+        # The 'gem/wiki_lingua_en' dataset has a 'target' field.
+        tgt = example.get("target", None) 
+        
+        if tgt is None:
+            tgt = example.get("text", None)
+        if tgt is None:
+            refs = example.get("references", None)
+            if isinstance(refs, list) and refs:
+                tgt = refs[0] # Use the first reference
+        if tgt is None:
+            tgt = "" # Default to empty string
+        
+        # Handle cases where the target might be a list (though not for this dataset)
+        if isinstance(tgt, list) and tgt:
+            tgt_text = str(tgt[0])
+        else:
+            tgt_text = str(tgt)
+
+        # --- 3. Return the final format ---
+        # Note: This trains the model to output the raw summary,
+        # not the JSON block mentioned in the prompt.
+        return {
+            "src_texts": src_text,
+            "tgt_texts": tgt_text,
+            "task": self.name
+        }
+
+
+class XSumTaskDataset(AbstractTaskDataset):
+    """Task processor for the XSum summarization dataset."""
+    name = "xsum"
+    task_specific_config = {'max_length': 64, 'num_beams': 1} # XSum summaries are short
+    metrics = [metrics.rouge]
+
+    def load_dataset(self, split: int):
+        # XSum is standalone
+        return datasets.load_dataset("xsum", split=split, trust_remote_code=True)
+
+    def preprocessor(self, example, add_prefix=True):
+        # Input `example` has 'document' and 'summary'
+        document = example.get("document", "")
+        summary = example.get("summary", "")
+
+        src_texts = [document] # The document itself is the source
+        tgt_texts = [summary]
+        
+        # Use a custom prefix for summarization tasks
+        return self.seq2seq_format(src_texts, tgt_texts, add_prefix,
+                                   prefix="summarize:")
+
+class WebNLGTaskDataset(AbstractTaskDataset):
+    """Task processor for the WebNLG (data-to-text) dataset."""
+    name = "web_nlg"
+    task_specific_config = {'max_length': 256, 'num_beams': 1}
+    metrics = [metrics.bleu]
+
+    def load_dataset(self, split: int):
+        # WebNLG is a config of the 'gem' dataset
+        # We must override load_dataset
+        return datasets.load_dataset(
+            "gem", 
+            "web_nlg_en", 
+            split=split, 
+            trust_remote_code=True  # Added from our last conversation
+        )
+
+    def preprocessor(self, example, add_prefix=True):
+        """
+        --- MODIFIED PREPROCESSOR ---
+        'target' in web_nlg is a list of strings (references).
+        We take the first reference as the target for training.
+        """
+        src_input = example.get("input", "")
+        
+        # --- FIX IS HERE ---
+        # Get the list of targets. Default to an empty list.
+        target_list = example.get("target", [])
+        
+        # Select the first target if the list is not empty, otherwise use an empty string.
+        target = target_list[0] if target_list else ""
+        # --- END FIX ---
+
+        src_texts = ["generate from triples:", src_input]
+        tgt_texts = [target]  # This is now guaranteed to be [str]
+        
+        return self.seq2seq_format(src_texts, tgt_texts, add_prefix)
+
+
+# --- Task Collator Mapping ---
+
+TASKS = OrderedDict([
+    # Add your GEM tasks here
+    ('dart', DARTTaskDataset),
+    ('common_gen', CommonGenTaskDataset),
+    ('xsum', XSumTaskDataset),
+    ('e2e_nlg', E2ENLGTaskDataset),
+    ('web_nlg', WebNLGTaskDataset),
+    ('wiki_lingua', WikiLinguaTaskDataset),
+    ('squad_v2', SquadV2TaskDataset),
+    # You can add more tasks here by creating a new class
+    # for each one and implementing its 'preprocessor'.
+    # ('mlsum_de', MLSumDETaskDataset),
+    # ('totto', TottoTaskDataset),
+])
+
+
+class AutoTask:
+    """
+    This is your "Task Collator" factory.
+    It retrieves the correct task processor class based on the task name.
+    (This class is the same as in your provided code)
+    """
+    @classmethod
+    def get(self, task_name, seed=42):
+        if task_name in TASKS:
+            return TASKS[task_name](seed)
+        raise ValueError(
+            "Unrecognized task {} for AutoTask Model: {}.\n"
+            "Task name should be one of {}.".format(
+                task_name, list(TASKS.keys())
+            )
+        )
+
+
+# --- Example Usage ---
+if __name__ == "__main__":
+    print("--- 🚀 Initializing GEM Task Collator ---")
+    
+    # 1. Get the task processor for 'dart'
+    dart_task = AutoTask.get("dart")
+    
+    # 2. Load and preprocess the dataset
+    # We get 5 validation samples for demonstration
+    print("\n--- 1. Loading and processing 'dart' task ---")
+    try:
+        dart_dataset = dart_task.get_dataset(split="validation", n_obs=5)
+        
+        print(f"Loaded {len(dart_dataset)} 'dart' samples.")
+        print("\nExample processed sample:")
+        sample = dart_dataset[0]
+        print(f"TASK: {sample['task']}")
+        print(f"SOURCE (src_texts):\n{sample['src_texts'][:500]}...")
+        print(f"\nTARGET (tgt_texts):\n{sample['tgt_texts']}")
+
+    except Exception as e:
+        print(f"Could not load 'dart' dataset. (Maybe network issue or 'fsspec' error?): {e}")
+
+
+    # 3. Get the task processor for 'xsum'
+    xsum_task = AutoTask.get("xsum")
+    
+    # 4. Load and preprocess the dataset
+    print("\n--- 2. Loading and processing 'xsum' task ---")
+    try:
+        xsum_dataset = xsum_task.get_dataset(split="validation", n_obs=5, add_prefix=True)
+        
+        print(f"Loaded {len(xsum_dataset)} 'xsum' samples.")
+        print("\nExample processed sample:")
+        sample = xsum_dataset[0]
+        print(f"TASK: {sample['task']}")
+        print(f"SOURCE (src_texts):\n{sample['src_texts'][:500]}...")
+        print(f"\nTARGET (tgt_texts):\n{sample['tgt_texts']}")
+        
+    except Exception as e:
+        print(f"Could not load 'xsum' dataset. (Maybe network issue?): {e}")
